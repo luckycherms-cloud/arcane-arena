@@ -4869,6 +4869,83 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ability_chain_player_scope_opponent_sacrifice_uses_scoped_controller() {
+        let mut state = GameState::new_two_player(42);
+        let own = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Own Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_a = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Opp Creature A".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_b = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opp Creature B".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_c = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Opp Creature C".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_d = create_object(
+            &mut state,
+            CardId(23),
+            PlayerId(1),
+            "Opp Creature D".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own, opp_a, opp_b, opp_c, opp_d] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                count: QuantityExpr::Fixed { value: 3 },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(cards.len(), 4);
+                assert!(cards.contains(&opp_a));
+                assert!(cards.contains(&opp_b));
+                assert!(cards.contains(&opp_c));
+                assert!(cards.contains(&opp_d));
+                assert!(!cards.contains(&own));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn player_scope_runs_unscoped_tail_once_after_scoped_iterations() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         create_object(

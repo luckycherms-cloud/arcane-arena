@@ -11067,9 +11067,27 @@ mod tests {
                 assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
                 assert_eq!(
                     *target,
-                    TargetFilter::Typed(
-                        TypedFilter::creature().controller(ControllerRef::Opponent)
-                    )
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn portal_to_phyrexia_etb_scopes_each_opponent_sacrifice_to_scoped_player() {
+        let def = parse_trigger_line(
+            "When this artifact enters, each opponent sacrifices three creatures of their choice.",
+            "Portal to Phyrexia",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+        match &*execute.effect {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
                 );
             }
             other => panic!("expected Sacrifice, got {other:?}"),

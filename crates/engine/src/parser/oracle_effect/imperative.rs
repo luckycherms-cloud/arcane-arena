@@ -5771,7 +5771,7 @@ mod tests {
         match &*def.effect {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => {
-                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
                     assert!(tf.type_filters.iter().any(|type_filter| matches!(
                         type_filter,
                         crate::types::ability::TypeFilter::Permanent

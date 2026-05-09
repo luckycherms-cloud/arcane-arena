@@ -6389,7 +6389,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 608.2k + CR 109.4: "that player sacrifices a non-Elf creature" /
         // "each opponent sacrifices a creature they control". When the subject
         // is a player reference (TriggeringPlayer / TargetPlayer / etc.) and
-        // CR 115.1 + CR 701.16a: Sacrifice with a typed object filter —
+        // CR 115.1 + CR 701.21a: Sacrifice with a typed object filter —
         // inject the subject's controller constraint. For non-targeted subjects
         // ("each player sacrifices a non-Elf creature"), this scopes the filter
         // to the acting player's permanents. For targeted subjects ("target
@@ -8496,7 +8496,7 @@ pub(crate) fn parse_effect_chain_ir(
         let chunk_actor = match (is_optional, opponent_may_scope, player_scope) {
             (true, None, None) => Some(ControllerRef::You),
             (true, Some(_), _) => Some(ControllerRef::Opponent),
-            (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::Opponent),
+            (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::You),
             (_, _, Some(PlayerFilter::Controller)) => Some(ControllerRef::You),
             _ => None,
         }
@@ -24681,7 +24681,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_effect_chain_each_other_player_defaults_sacrifice_to_opponent() {
+    fn parse_effect_chain_each_other_player_defaults_sacrifice_to_scoped_player() {
         let ability = parse_effect_chain(
             "each other player sacrifices a creature of their choice",
             AbilityKind::Spell,
@@ -24691,8 +24691,8 @@ mod tests {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
                     tf.controller,
-                    Some(ControllerRef::Opponent),
-                    "each other player must restrict sacrifice choices to that opponent's creatures"
+                    Some(ControllerRef::You),
+                    "player-scoped sacrifice must restrict choices to the scoped player's creatures"
                 ),
                 other => panic!("expected Typed Sacrifice target, got {other:?}"),
             },
