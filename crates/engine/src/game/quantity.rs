@@ -4293,6 +4293,7 @@ mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 3,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
                 SpellCastRecord {
                     core_types: vec![CoreType::Artifact],
@@ -4302,6 +4303,7 @@ mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
+                    from_zone: None,
                 },
             ],
         );

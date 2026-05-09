@@ -186,6 +186,11 @@ pub struct SpellCastRecord {
     /// the underlying object (which may have left the stack).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub has_x_in_cost: bool,
+    /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
+    /// so per-turn spell-history conditions can answer "from your hand" after
+    /// the spell has moved on from the stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_zone: Option<Zone>,
 }
 
 /// CR 601.2f: A pending one-shot cost reduction for the next spell a player casts.

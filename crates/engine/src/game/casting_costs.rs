@@ -2070,7 +2070,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .get(&object_id)
         .expect("spell object still exists after stack push")
         .clone();
-    restrictions::record_spell_cast(state, player, &obj);
+    restrictions::record_spell_cast_from_zone(state, player, &obj, Some(source_zone));
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);

@@ -6313,6 +6313,44 @@ mod tests {
         assert!(def.execute.is_some());
     }
 
+    #[test]
+    fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you haven't cast a spell from your hand this turn, draw a card.",
+            "Jem Lightfoote, Sky Explorer",
+        );
+        match def.condition {
+            Some(TriggerCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                    },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }) => assert!(properties.contains(&FilterProp::InZone { zone: Zone::Hand })),
+            Some(TriggerCondition::And { conditions }) => {
+                assert!(conditions.iter().any(|condition| matches!(
+                    condition,
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            },
+                        },
+                        comparator: Comparator::EQ,
+                        rhs: QuantityExpr::Fixed { value: 0 },
+                    } if properties.contains(&FilterProp::InZone { zone: Zone::Hand })
+                )))
+            }
+            other => panic!("expected cast-origin intervening condition, got {other:?}"),
+        }
+    }
+
     // CR 603.6a + CR 611.2b: "Whenever a permanent you control enters tapped, ..." —
     // Amulet of Vigor class. The `enters tapped` rider must set
     // `SourceIsTapped` (fires only when entering tapped).

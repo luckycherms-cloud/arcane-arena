@@ -1167,6 +1167,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         colors: spell_obj.color.clone(),
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
+        from_zone: Some(spell_obj.zone),
     }
 }
 
@@ -1446,6 +1447,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
+        FilterProp::InZone { zone: required } => record.from_zone == Some(*required),
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking
         | FilterProp::AttackingController
@@ -1456,7 +1458,6 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Untapped
         | FilterProp::CountersGE { .. }
         | FilterProp::HasAnyCounter
-        | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
         | FilterProp::Foretold
         | FilterProp::EnchantedBy
@@ -3090,6 +3091,7 @@ mod tests {
             colors: vec![ManaColor::Blue],
             mana_value: 3,
             has_x_in_cost: false,
+            from_zone: None,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -3128,9 +3130,11 @@ mod tests {
             colors: vec![],
             mana_value: 3,
             has_x_in_cost: true,
+            from_zone: None,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
+            from_zone: None,
             ..x_record.clone()
         };
         let filter = TargetFilter::Typed(
@@ -3144,6 +3148,39 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn spell_record_matches_cast_origin_zone_filter() {
+        let hand_record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 2,
+            has_x_in_cost: false,
+            from_zone: Some(Zone::Hand),
+        };
+        let exile_record = SpellCastRecord {
+            from_zone: Some(Zone::Exile),
+            ..hand_record.clone()
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+        );
+        assert!(spell_record_matches_filter(
+            &hand_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
+        assert!(!spell_record_matches_filter(
+            &exile_record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
     }
 
     #[test]
@@ -5858,6 +5895,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 0,
                 has_x_in_cost: false,
+                from_zone: None,
             }
         };
 
@@ -6253,6 +6291,7 @@ mod tests {
             colors: vec![],
             mana_value: 7,
             has_x_in_cost: false,
+            from_zone: None,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

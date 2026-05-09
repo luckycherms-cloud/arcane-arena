@@ -5671,6 +5671,7 @@ fn cant_cast_filter_matches(
                 colors: spell_obj.color.clone(),
                 mana_value: spell_obj.mana_cost.mana_value(),
                 has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+                from_zone: Some(spell_obj.zone),
             };
             super::filter::spell_record_matches_filter(
                 &record,
@@ -5720,6 +5721,7 @@ fn is_blocked_by_per_turn_cast_limit(
                     colors: spell_obj.color.clone(),
                     mana_value: spell_obj.mana_cost.mana_value(),
                     has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
+                    from_zone: Some(spell_obj.zone),
                 };
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
@@ -12021,6 +12023,7 @@ mod tests {
                 colors: vec![],
                 mana_value: 1,
                 has_x_in_cost: false,
+                from_zone: None,
             }],
         );
 
