@@ -2886,6 +2886,24 @@ fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
     let subject = text[..subject_lower.len()].trim();
     let predicate = &text[text.len() - predicate_lower.len()..];
     let affected = parse_continuous_subject_filter(subject)?;
+
+    let predicate_tp = TextPair::new(predicate, predicate_lower);
+    if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
+        let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
+        let condition_text = after_cond.original.trim().trim_end_matches('.');
+        let condition =
+            parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
+                text: condition_text.to_string(),
+            });
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .condition(condition)
+                .description(text.to_string()),
+        );
+    }
+
     let modifications = parse_additive_type_clause_modifications(predicate)?;
     Some(
         StaticDefinition::continuous()
@@ -2965,8 +2983,10 @@ pub(crate) fn parse_additive_type_clause_modifications(
     .parse(after_suffix_lower)
     .ok()?
     .1;
-    let granted_modifications = granted_lower
+    let granted_original = granted_lower
         .map(|granted| &clause_original[clause_original.len() - granted.len()..])
+        .map(str::trim);
+    let granted_modifications = granted_original
         .map(parse_quoted_ability_modifications)
         .unwrap_or_default();
 
@@ -2991,6 +3011,9 @@ pub(crate) fn parse_additive_type_clause_modifications(
     }
 
     modifications.extend(granted_modifications);
+    if let Some(granted) = granted_original {
+        push_base_pt_mana_value_dynamic_modifications(&mut modifications, &granted.to_lowercase());
+    }
     (!modifications.is_empty()).then_some(modifications)
 }
 
@@ -6229,9 +6252,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     {
         modifications.push(ContinuousModification::SetPowerDynamic { value: power });
         modifications.push(ContinuousModification::SetToughnessDynamic { value: toughness });
-    } else if let Some((power, toughness)) = parse_base_pt_mod(&unquoted_text) {
-        modifications.push(ContinuousModification::SetPower { value: power });
-        modifications.push(ContinuousModification::SetToughness { value: toughness });
+    } else if !push_base_pt_mana_value_dynamic_modifications(&mut modifications, &unquoted_lower) {
+        if let Some((power, toughness)) = parse_base_pt_mod(&unquoted_text) {
+            modifications.push(ContinuousModification::SetPower { value: power });
+            modifications.push(ContinuousModification::SetToughness { value: toughness });
+        }
     }
     if let Some(power) = parse_base_power_mod(&unquoted_text) {
         modifications.push(ContinuousModification::SetPower { value: power });
@@ -6477,6 +6502,40 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let tp = TextPair::new(text, &lower);
     let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
+}
+
+fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+    type VE<'a> = OracleError<'a>;
+    nom_primitives::scan_split_at_phrase(lower, |input| {
+        alt((
+            tag::<_, _, VE<'_>>("base power and base toughness each equal to its mana value"),
+            tag("base power and toughness each equal to its mana value"),
+            tag("power and toughness each equal to its mana value"),
+            tag("base power and base toughness are each equal to its mana value"),
+            tag("base power and toughness are each equal to its mana value"),
+            tag("power and toughness are each equal to its mana value"),
+        ))
+        .parse(input)
+    })?;
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectManaValue {
+            scope: ObjectScope::Recipient,
+        },
+    })
+}
+
+fn push_base_pt_mana_value_dynamic_modifications(
+    modifications: &mut Vec<ContinuousModification>,
+    lower: &str,
+) -> bool {
+    let Some(value) = parse_base_pt_mana_value_dynamic(lower) else {
+        return false;
+    };
+    modifications.push(ContinuousModification::SetPowerDynamic {
+        value: value.clone(),
+    });
+    modifications.push(ContinuousModification::SetToughnessDynamic { value });
+    true
 }
 
 /// One side of a dynamic base-P/T value token like `X/X` or `-X/2`.
@@ -15618,6 +15677,95 @@ mod tests {
             0,
             "literal SetPower/SetToughness must not be emitted for X/X"
         );
+    }
+
+    #[test]
+    fn base_pt_equal_to_recipient_mana_value_emits_dynamic_setters() {
+        let mods = parse_continuous_modifications(
+            "is a creature in addition to its other types and has base power and base toughness each equal to its mana value",
+        );
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient
+                    }
+                }
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Recipient
+                    }
+                }
+            }
+        )));
+    }
+
+    #[test]
+    fn static_animation_base_pt_equal_to_mana_value_reaches_line_parser() {
+        let def = parse_static_line(
+            "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.",
+        )
+        .expect("mana-value animation static should parse");
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn conditional_static_animation_base_pt_equal_to_mana_value_keeps_condition() {
+        let def = parse_static_line(
+            "As long as you control five or more enchantments, each other non-Aura enchantment you control is a creature in addition to its other types and has base power and base toughness each equal to its mana value.",
+        )
+        .expect("conditional mana-value animation static should parse");
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            })
+        ));
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                }
+            )
+        }));
     }
 
     // CR 700.9: "Modified creatures you control have <keyword>" class.
