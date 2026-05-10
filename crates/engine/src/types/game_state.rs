@@ -1007,15 +1007,44 @@ pub struct PendingBeginGameAbility {
     pub ability: ResolvedAbility,
 }
 
+/// CR 103.5: Per-player state during the simultaneous mulligan decision phase.
+/// One entry per player who has not yet declared "keep".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganDecisionEntry {
+    pub player: PlayerId,
+    pub mulligan_count: u8,
+}
+
+/// CR 103.5: Per-player state during the simultaneous bottom-cards phase.
+/// One entry per player who must put cards on the bottom of their library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MulliganBottomEntry {
+    pub player: PlayerId,
+    pub count: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
     Priority {
         player: PlayerId,
     },
+    /// CR 103.5: London mulligan — each un-kept player decides simultaneously.
+    /// The `pending` list holds every player who has not yet chosen "keep",
+    /// each with their current mulligan count. Players act in any order;
+    /// each `MulliganDecision { keep: true }` removes the actor from `pending`,
+    /// each `MulliganDecision { keep: false }` increments their count and
+    /// redraws but keeps them in `pending`. When `pending` is empty the flow
+    /// advances to `MulliganBottomCards` (if anyone owes bottoms) or
+    /// `finish_mulligans`.
+    ///
+    /// CR 103.5b/103.5d deferred: round-boundary timing for "any time you
+    /// could mulligan" effects (e.g. Serum Powder) and Two-Headed Giant
+    /// team mulligans are not modeled. Each player's mulligan loop is
+    /// collapsed across rounds. Output state is equivalent for the scope
+    /// of cards currently supported.
     MulliganDecision {
-        player: PlayerId,
-        mulligan_count: u8,
+        pending: Vec<MulliganDecisionEntry>,
         /// CR 103.5c + Commander RC supplement: whether this game grants a
         /// free first mulligan (multiplayer ≥3 seats, or a duel in a format
         /// where `GameFormat::grants_free_first_mulligan()` is true).
@@ -1023,9 +1052,12 @@ pub enum WaitingFor {
         /// without re-deriving format/seat rules.
         free_first_mulligan: bool,
     },
+    /// CR 103.5: After all players have kept, each player who mulliganed at
+    /// least once (and is not on the free-first discount) must put N cards on
+    /// the bottom of their library, where N = `count`. All such players choose
+    /// simultaneously and submit `SelectCards { cards }` in any order.
     MulliganBottomCards {
-        player: PlayerId,
-        count: u8,
+        pending: Vec<MulliganBottomEntry>,
     },
     ManaPayment {
         player: PlayerId,
@@ -2103,11 +2135,28 @@ pub enum RetargetScope {
 
 impl WaitingFor {
     /// Extract the player who must act, if any.
+    ///
+    /// CR 103.5: For simultaneous-decision states (`MulliganDecision`,
+    /// `MulliganBottomCards`) this returns `Some(p)` only when exactly one
+    /// player is pending, and `None` when multiple are pending — callers
+    /// that need set semantics must use [`Self::acting_players`] instead.
     pub fn acting_player(&self) -> Option<PlayerId> {
         match self {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                if pending.len() == 1 {
+                    Some(pending[0].player)
+                } else {
+                    None
+                }
+            }
+            WaitingFor::MulliganBottomCards { pending } => {
+                if pending.len() == 1 {
+                    Some(pending[0].player)
+                } else {
+                    None
+                }
+            }
             WaitingFor::Priority { player }
-            | WaitingFor::MulliganDecision { player, .. }
-            | WaitingFor::MulliganBottomCards { player, .. }
             | WaitingFor::ManaPayment { player, .. }
             | WaitingFor::ChooseXValue { player, .. }
             | WaitingFor::TargetSelection { player, .. }
@@ -2200,6 +2249,26 @@ impl WaitingFor {
             | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
+        }
+    }
+
+    /// CR 103.5: Set of players who are currently authorized to act in this
+    /// `WaitingFor` state. For all single-player-pending variants this returns
+    /// a single-element Vec containing [`Self::acting_player`]. For the
+    /// simultaneous mulligan variants this returns every player still pending.
+    ///
+    /// Engine authorization checks should use this in preference to
+    /// `acting_player()` so the simultaneous variants accept actions from any
+    /// of the pending players in any arrival order.
+    pub fn acting_players(&self) -> Vec<PlayerId> {
+        match self {
+            WaitingFor::MulliganDecision { pending, .. } => {
+                pending.iter().map(|e| e.player).collect()
+            }
+            WaitingFor::MulliganBottomCards { pending } => {
+                pending.iter().map(|e| e.player).collect()
+            }
+            _ => self.acting_player().into_iter().collect(),
         }
     }
 
@@ -2840,6 +2909,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub lands_tapped_for_mana: HashMap<PlayerId, Vec<ObjectId>>,
 
+    /// CR 103.5: Per-player locked-in mulligan count, populated as each player
+    /// declares "keep" during the simultaneous decision phase. Read by the
+    /// bottoms-phase builder to compute how many cards each player must put
+    /// on the bottom of their library. Cleared when the mulligan flow finishes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub final_mulligan_counts: HashMap<PlayerId, u8>,
+
     /// When true, `GameAction::Debug(...)` actions are accepted.
     /// Set at game initialization, immutable after creation.
     /// Always false for multiplayer games.
@@ -3440,6 +3516,7 @@ impl GameState {
             auto_pass: HashMap::new(),
             phase_stops: HashMap::new(),
             lands_tapped_for_mana: HashMap::new(),
+            final_mulligan_counts: HashMap::new(),
             match_config: MatchConfig::default(),
             match_phase: MatchPhase::InGame,
             match_score: MatchScore::default(),
@@ -3889,13 +3966,17 @@ mod tests {
             player: PlayerId(0),
         }));
         variants.push(Box::new(WaitingFor::MulliganDecision {
-            player: PlayerId(0),
-            mulligan_count: 1,
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+            }],
             free_first_mulligan: false,
         }));
         variants.push(Box::new(WaitingFor::MulliganBottomCards {
-            player: PlayerId(0),
-            count: 2,
+            pending: vec![MulliganBottomEntry {
+                player: PlayerId(0),
+                count: 2,
+            }],
         }));
         variants.push(Box::new(WaitingFor::ManaPayment {
             player: PlayerId(0),

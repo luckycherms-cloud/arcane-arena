@@ -673,9 +673,15 @@ export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | {
       type: "MulliganDecision";
-      data: { player: PlayerId; mulligan_count: number; free_first_mulligan: boolean };
+      data: {
+        pending: { player: PlayerId; mulligan_count: number }[];
+        free_first_mulligan: boolean;
+      };
     }
-  | { type: "MulliganBottomCards"; data: { player: PlayerId; count: number } }
+  | {
+      type: "MulliganBottomCards";
+      data: { pending: { player: PlayerId; count: number }[] };
+    }
   | { type: "ManaPayment"; data: { player: PlayerId } }
   | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }

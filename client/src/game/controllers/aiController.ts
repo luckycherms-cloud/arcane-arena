@@ -1,6 +1,6 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
-import type { GameAction } from "../../adapter/types";
+import type { GameAction, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
 import { debugLog } from "../debugLog";
@@ -57,9 +57,34 @@ export function createAIController(config: AIControllerConfig): AIController {
   const aiPlayerIds = new Set(difficultyByPlayerId.keys());
 
   /** Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}. */
-  function waitingForKey(wf: { type: string; data?: { player?: number } }): string {
-    const player = wf.data?.player ?? -1;
+  function waitingForKey(wf: WaitingFor): string {
+    const data = (wf as { data?: { player?: number } }).data;
+    const player = data?.player ?? -1;
     return `${wf.type}:${player}`;
+  }
+
+  /**
+   * CR 103.5: For simultaneous mulligan states, return the first AI-controlled
+   * player in `pending` so the AI controller can act for them. Returns null
+   * if no AI player is pending (the local human still owes a decision).
+   */
+  function aiPendingForMulligan(wf: {
+    type: string;
+    data?: { pending?: { player: number }[] };
+  }): number | null {
+    if (
+      wf.type !== "MulliganDecision" &&
+      wf.type !== "MulliganBottomCards"
+    ) {
+      return null;
+    }
+    const pending = wf.data?.pending ?? [];
+    for (const entry of pending) {
+      if (entry.player !== PLAYER_ID && aiPlayerIds.has(entry.player)) {
+        return entry.player;
+      }
+    }
+    return null;
   }
 
   function checkAndSchedule() {
@@ -73,13 +98,35 @@ export function createAIController(config: AIControllerConfig): AIController {
     // Game over -- stop scheduling
     if (waitingFor.type === "GameOver") return;
 
-    // Check if it's an AI player's turn — any non-human player is AI.
-    // This is dynamic rather than gating on a static set so that
-    // restoreGameState (debug panel import) with a different player count
-    // works without rebuilding the controller.
-    if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
-    const waitingPlayerId = waitingFor.data.player;
-    if (waitingPlayerId === PLAYER_ID) return;
+    // CR 103.5: Simultaneous mulligan — pending may contain multiple players;
+    // route to the first AI seat that still owes a decision/bottom selection.
+    // For all other states, use the single-player `data.player` path.
+    let waitingPlayerId: number;
+    const mulliganPid = aiPendingForMulligan(
+      waitingFor as { type: string; data?: { pending?: { player: number }[] } },
+    );
+    if (mulliganPid !== null) {
+      waitingPlayerId = mulliganPid;
+    } else if (
+      waitingFor.type === "MulliganDecision" ||
+      waitingFor.type === "MulliganBottomCards"
+    ) {
+      // Local human is pending (or no AI players left in pending) — do nothing.
+      return;
+    } else {
+      // Check if it's an AI player's turn — any non-human player is AI.
+      // This is dynamic rather than gating on a static set so that
+      // restoreGameState (debug panel import) with a different player count
+      // works without rebuilding the controller.
+      if (
+        !("data" in waitingFor) ||
+        !waitingFor.data ||
+        !("player" in waitingFor.data)
+      )
+        return;
+      waitingPlayerId = waitingFor.data.player as number;
+      if (waitingPlayerId === PLAYER_ID) return;
+    }
 
     const stackLen = state.stack?.length ?? 0;
     if (stackLen >= STACK_PRESSURE_ELEVATED) return;
@@ -134,7 +181,7 @@ export function createAIController(config: AIControllerConfig): AIController {
       // Dispatch the fallback as the AI seat that's being unstuck — NEVER
       // as the local human. The engine guard would reject a human-seat actor
       // while the WaitingFor belongs to the AI.
-      dispatchAction(fallback, waitingFor.data.player)
+      dispatchAction(fallback, waitingPlayerId)
         .then(() => {
           consecutiveFailures = 0;
           totalFailures = 0;
@@ -155,7 +202,7 @@ export function createAIController(config: AIControllerConfig): AIController {
       return;
     }
 
-    scheduleAction(waitingFor.data.player);
+    scheduleAction(waitingPlayerId);
   }
 
   function scheduleAction(playerId: number) {

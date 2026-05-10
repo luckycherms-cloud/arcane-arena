@@ -42,8 +42,22 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
-    let Some(acting_player) = state.waiting_for.acting_player() else {
-        return true;
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards) `acting_player()` is None when multiple players
+    // are pending. The Priority-branch check below only fires for the
+    // Priority variant, so we substitute the first pending player as a
+    // representative — the downstream mulligan/bottom dispatch is
+    // already validated by `invalid_action_for_state`.
+    let acting_player = match state.waiting_for.acting_player() {
+        Some(p) => p,
+        None => {
+            let players = state.waiting_for.acting_players();
+            if let Some(&first) = players.first() {
+                first
+            } else {
+                return true;
+            }
+        }
     };
 
     match (&state.waiting_for, action) {
@@ -177,12 +191,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
             *amount < *min || *amount > *max
         }
-        (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
-            selection_mismatch(
-                cards,
-                &state.players[player.0 as usize].hand,
-                Some((*count).into()),
-            )
+        // CR 103.5: SelectCards is invalid if (a) no pending entry exists for
+        // any player whose hand contains all the selected cards, or (b) the
+        // count doesn't match the pending entry's owed bottom count. Because
+        // the actor identity is carried via authorization upstream, this filter
+        // only validates the count against any pending entry whose hand fits.
+        (WaitingFor::MulliganBottomCards { pending }, GameAction::SelectCards { cards }) => {
+            pending.iter().all(|entry| {
+                selection_mismatch(
+                    cards,
+                    &state.players[entry.player.0 as usize].hand,
+                    Some(entry.count.into()),
+                )
+            })
         }
         (
             WaitingFor::ScryChoice { player: _, cards },
@@ -600,7 +621,11 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
 /// P2P multiplayer host broadcasts a filtered state + legal-actions payload
 /// per guest; only the acting guest needs a populated legal-actions map.
 pub fn legal_actions_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsFull {
-    if state.waiting_for.acting_player() == Some(viewer) {
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards), every pending player has a legal action set. Use
+    // `acting_players()` so guests in a multiplayer mulligan can see and
+    // submit their own decisions concurrently.
+    if state.waiting_for.acting_players().contains(&viewer) {
         legal_actions_full(state)
     } else {
         (Vec::new(), HashMap::new(), HashMap::new())

@@ -328,21 +328,30 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::MulliganDecision { .. } => vec![
-            candidate(
-                GameAction::MulliganDecision { keep: true },
-                TacticalClass::Selection,
-                state.waiting_for.acting_player(),
-            ),
-            candidate(
-                GameAction::MulliganDecision { keep: false },
-                TacticalClass::Selection,
-                state.waiting_for.acting_player(),
-            ),
-        ],
-        WaitingFor::MulliganBottomCards { player, count } => {
-            bottom_card_actions(state, *player, *count)
-        }
+        // CR 103.5: For simultaneous mulligan, generate candidates for each
+        // pending player. AI search iterates over the cross-product; the
+        // engine accepts them in any arrival order.
+        WaitingFor::MulliganDecision { pending, .. } => pending
+            .iter()
+            .flat_map(|entry| {
+                [
+                    candidate(
+                        GameAction::MulliganDecision { keep: true },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                    candidate(
+                        GameAction::MulliganDecision { keep: false },
+                        TacticalClass::Selection,
+                        Some(entry.player),
+                    ),
+                ]
+            })
+            .collect(),
+        WaitingFor::MulliganBottomCards { pending } => pending
+            .iter()
+            .flat_map(|entry| bottom_card_actions(state, entry.player, entry.count))
+            .collect(),
         _ => Vec::new(),
     }
 }

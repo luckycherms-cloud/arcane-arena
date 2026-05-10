@@ -189,10 +189,13 @@ fn check_actor_authorization(
     ) {
         return Ok(());
     }
-    if let Some(expected) = turn_control::authorized_submitter(state) {
-        if expected != actor {
-            return Err(EngineError::WrongPlayer);
-        }
+    // CR 103.5: For simultaneous-decision states (MulliganDecision,
+    // MulliganBottomCards), authorize against the full pending set so any
+    // pending player may submit in any order. Falls back to single-player
+    // semantics for every other variant.
+    let authorized = turn_control::authorized_submitters(state);
+    if !authorized.is_empty() && !authorized.contains(&actor) {
+        return Err(EngineError::WrongPlayer);
     }
     Ok(())
 }
@@ -211,11 +214,17 @@ pub fn apply_as_current(
 ) -> Result<ActionResult, EngineError> {
     let actor = match &action {
         GameAction::Concede { player_id } => *player_id,
-        _ => turn_control::authorized_submitter(state).ok_or_else(|| {
-            EngineError::InvalidAction(
-                "apply_as_current: no authorized submitter (game over?)".to_string(),
-            )
-        })?,
+        // CR 103.5: For simultaneous-decision states, pick the first pending
+        // player as the simulation representative. `authorized_submitters`
+        // returns the full set; `first()` is deterministic (seat-ordered).
+        _ => {
+            let submitters = turn_control::authorized_submitters(state);
+            submitters.first().copied().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "apply_as_current: no authorized submitter (game over?)".to_string(),
+                )
+            })?
+        }
     };
     apply(state, actor, action)
 }
@@ -1016,38 +1025,37 @@ fn apply_action(
         return super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events);
     }
 
-    // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
-    if let Some(player) = turn_control::authorized_submitter(state) {
-        match &action {
-            GameAction::SetAutoPass { .. }
-            | GameAction::PassPriority
-            | GameAction::ReorderHand { .. } => {}
-            _ => {
-                state.auto_pass.remove(&player);
-            }
+    // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
+    // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
+    // variants (where `authorized_submitter` is None when multiple players are pending)
+    // still clear per-actor side-effect state correctly.
+    match &action {
+        GameAction::SetAutoPass { .. }
+        | GameAction::PassPriority
+        | GameAction::ReorderHand { .. } => {}
+        _ => {
+            state.auto_pass.remove(&actor);
         }
     }
 
     // Clear manual mana-tap tracking when the player commits to a non-mana action.
     // ActivateAbility is handled per-arm (only non-mana abilities clear tracking).
-    if let Some(player) = turn_control::authorized_submitter(state) {
-        match &action {
-            GameAction::PassPriority
-            | GameAction::PlayLand { .. }
-            | GameAction::CastSpell { .. }
-            | GameAction::Foretell { .. }
-            | GameAction::CastSpellAsSneak { .. }
-            | GameAction::CastSpellAsWebSlinging { .. }
-            | GameAction::CastSpellForFree { .. }
-            | GameAction::CastSpellAsMiracle { .. }
-            | GameAction::CancelCast
-            | GameAction::UnlockRoomDoor { .. }
-            | GameAction::PayUnlessCost { .. }
-            | GameAction::PayCombatTax { .. } => {
-                state.lands_tapped_for_mana.remove(&player);
-            }
-            _ => {}
+    match &action {
+        GameAction::PassPriority
+        | GameAction::PlayLand { .. }
+        | GameAction::CastSpell { .. }
+        | GameAction::Foretell { .. }
+        | GameAction::CastSpellAsSneak { .. }
+        | GameAction::CastSpellAsWebSlinging { .. }
+        | GameAction::CastSpellForFree { .. }
+        | GameAction::CastSpellAsMiracle { .. }
+        | GameAction::CancelCast
+        | GameAction::UnlockRoomDoor { .. }
+        | GameAction::PayUnlessCost { .. }
+        | GameAction::PayCombatTax { .. } => {
+            state.lands_tapped_for_mana.remove(&actor);
         }
+        _ => {}
     }
 
     // Validate and process action against current WaitingFor
@@ -2217,22 +2225,18 @@ fn apply_action(
                 convoke_mode: Some(mode),
             }
         }
-        (
-            WaitingFor::MulliganDecision {
-                player,
-                mulligan_count,
-                ..
-            },
-            GameAction::MulliganDecision { keep },
-        ) => {
-            let p = *player;
-            let mc = *mulligan_count;
-            mulligan::handle_mulligan_decision(state, p, keep, mc, &mut events)
+        (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { keep }) => {
+            // CR 103.5: `actor` is already authorized as a member of `pending`
+            // by `check_actor_authorization`. The mulligan module resolves the
+            // per-player state update and either re-emits MulliganDecision
+            // (with the actor removed if they kept) or advances to the next
+            // phase when the pending set is empty.
+            mulligan::handle_mulligan_decision(state, actor, keep, &mut events)
+                .map_err(EngineError::InvalidAction)?
         }
-        (WaitingFor::MulliganBottomCards { player, count }, GameAction::SelectCards { cards }) => {
-            let p = *player;
-            let c = *count;
-            mulligan::handle_mulligan_bottom(state, p, cards, c, &mut events)
+        (WaitingFor::MulliganBottomCards { .. }, GameAction::SelectCards { cards }) => {
+            // CR 103.5: `actor` is already authorized as a member of `pending`.
+            mulligan::handle_mulligan_bottom(state, actor, cards, &mut events)
                 .map_err(EngineError::InvalidAction)?
         }
         (WaitingFor::DeclareAttackers { player, .. }, GameAction::DeclareAttackers { attacks }) => {
@@ -6318,30 +6322,23 @@ mod tests {
         let result = start_game_with_starting_player(&mut state, PlayerId(0));
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::MulliganDecision {
-                player: PlayerId(0),
-                mulligan_count: 0,
-                ..
-            }
+            WaitingFor::MulliganDecision { .. }
         ));
 
         // Both players have 7 cards in hand
         assert_eq!(state.players[0].hand.len(), 7);
         assert_eq!(state.players[1].hand.len(), 7);
 
-        // Player 0 keeps
+        // Player 0 keeps (apply_as_current picks first pending player = P0)
         let result =
             apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::MulliganDecision {
-                player: PlayerId(1),
-                mulligan_count: 0,
-                ..
-            }
+            WaitingFor::MulliganDecision { .. }
         ));
 
-        // Player 1 keeps -> game starts, auto-advances to PreCombatMain
+        // Player 1 keeps (apply_as_current now picks P1 since P0 was removed)
+        // -> game starts, auto-advances to PreCombatMain
         let result =
             apply_as_current(&mut state, GameAction::MulliganDecision { keep: true }).unwrap();
         assert!(matches!(

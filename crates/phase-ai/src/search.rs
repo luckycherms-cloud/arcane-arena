@@ -50,6 +50,24 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    // CR 103.5: For simultaneous mulligan states, the AI controller's only
+    // job is to act on behalf of `ai_player`. If `ai_player` is not in the
+    // pending set, there is nothing to choose — return None so the WASM
+    // bridge doesn't fabricate an action that would fail authorization.
+    match &state.waiting_for {
+        WaitingFor::MulliganDecision { pending, .. }
+            if !pending.iter().any(|e| e.player == ai_player) =>
+        {
+            return None;
+        }
+        WaitingFor::MulliganBottomCards { pending }
+            if !pending.iter().any(|e| e.player == ai_player) =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+
     // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
     // dedicated simple-eval heuristic rather than going through the tactical
     // policy registry. Punishment value vs counter value.
@@ -915,34 +933,37 @@ pub(crate) fn deterministic_choice(
     // `MulliganRegistry` for structured, feature-aware hand evaluation. All
     // registered `MulliganPolicy` implementations contribute; search can't
     // evaluate these (the hand isn't yet committed to an opening state).
-    if let WaitingFor::MulliganDecision {
-        player,
-        mulligan_count,
-        ..
-    } = &state.waiting_for
-    {
-        let ctx = build_ai_context(state, *player, config);
+    //
+    // CR 103.5: With simultaneous mulligan, `pending` may contain several
+    // players. The AI controller's job is to choose for `ai_player`; if
+    // `ai_player` is in the pending set, evaluate their own hand. Otherwise
+    // no action is owed by this AI right now.
+    if let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for {
+        let entry = pending.iter().find(|e| e.player == ai_player)?;
+        let player = entry.player;
+        let mulligan_count = entry.mulligan_count;
+        let ctx = build_ai_context(state, player, config);
         let default_features = crate::features::DeckFeatures::default();
         let default_plan = crate::plan::PlanSnapshot::default();
         let features = ctx
             .session
             .features
-            .get(player)
+            .get(&player)
             .unwrap_or(&default_features);
-        let plan = ctx.session.plan.get(player).unwrap_or(&default_plan);
+        let plan = ctx.session.plan.get(&player).unwrap_or(&default_plan);
         let hand: Vec<_> = state.players[player.0 as usize]
             .hand
             .iter()
             .copied()
             .collect();
-        let turn_order = crate::policies::mulligan::turn_order_for(state, *player);
+        let turn_order = crate::policies::mulligan::turn_order_for(state, player);
         let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
             &hand,
             state,
             features,
             plan,
             turn_order,
-            *mulligan_count,
+            mulligan_count,
         );
         return Some(GameAction::MulliganDecision {
             keep: decision.keep,

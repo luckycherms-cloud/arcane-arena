@@ -1212,24 +1212,38 @@ function GamePageContent({
           />
         )}
 
+      {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
+          they are in the pending set. Each player decides independently. */}
       {waitingFor?.type === "MulliganDecision" &&
-        waitingFor.data.player === playerId && (
-          <MulliganDecisionPrompt
-            playerId={waitingFor.data.player}
-            mulliganCount={waitingFor.data.mulligan_count}
-            freeFirstMulligan={waitingFor.data.free_first_mulligan}
-            onChoose={handleMulliganChoice}
-          />
-        )}
+        (() => {
+          const entry = waitingFor.data.pending.find(
+            (e) => e.player === playerId,
+          );
+          if (!entry) return null;
+          return (
+            <MulliganDecisionPrompt
+              playerId={entry.player}
+              mulliganCount={entry.mulligan_count}
+              freeFirstMulligan={waitingFor.data.free_first_mulligan}
+              onChoose={handleMulliganChoice}
+            />
+          );
+        })()}
 
       {waitingFor?.type === "MulliganBottomCards" &&
-        waitingFor.data.player === playerId && (
-          <MulliganBottomCardsPrompt
-            playerId={waitingFor.data.player}
-            count={waitingFor.data.count}
-            onChoose={handleBottomCards}
-          />
-        )}
+        (() => {
+          const entry = waitingFor.data.pending.find(
+            (e) => e.player === playerId,
+          );
+          if (!entry) return null;
+          return (
+            <MulliganBottomCardsPrompt
+              playerId={entry.player}
+              count={entry.count}
+              onChoose={handleBottomCards}
+            />
+          );
+        })()}
 
       {waitingFor?.type === "BetweenGamesSideboard" &&
         waitingFor.data.player === playerId &&

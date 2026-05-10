@@ -167,8 +167,10 @@ mod tests {
         assert_eq!(
             classify(
                 &WaitingFor::MulliganDecision {
-                    player: PlayerId(0),
-                    mulligan_count: 0,
+                    pending: vec![engine::types::game_state::MulliganDecisionEntry {
+                        player: PlayerId(0),
+                        mulligan_count: 0,
+                    }],
                     free_first_mulligan: false,
                 },
                 &dummy_action

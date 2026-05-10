@@ -47,6 +47,23 @@ pub fn acting_player(state: &GameState) -> Option<PlayerId> {
     engine::game::turn_control::authorized_submitter(state)
 }
 
+/// CR 103.5: Set of players who may act in the current WaitingFor — full
+/// pending set for simultaneous-decision states, single-element for everything
+/// else. Used by multiplayer transports to broadcast legal actions to every
+/// pending player concurrently.
+pub fn acting_players(state: &GameState) -> Vec<PlayerId> {
+    engine::game::turn_control::authorized_submitters(state)
+}
+
+/// CR 103.5: True iff `player` is one of the actors permitted to submit an
+/// action for the current WaitingFor. Replaces the
+/// `acting_player(state) == Some(player)` idiom at multiplayer routing sites
+/// so the simultaneous-decision states (MulliganDecision, MulliganBottomCards)
+/// route legal actions to every pending player, not just the first.
+pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
+    engine::game::turn_control::is_authorized_submitter(state, player)
+}
+
 pub struct GameSession {
     pub game_code: String,
     pub state: GameState,
@@ -731,18 +748,18 @@ impl SessionManager {
             ));
         }
 
-        // Validate it's this player's turn to act
-        let current_actor = acting_player(&session.state);
-        match current_actor {
-            None => {
-                warn!(game = %game_code, player = ?player, reason = "game_over", "action rejected");
-                return Err("Game is over".to_string());
-            }
-            Some(actor) if actor != player => {
-                warn!(game = %game_code, player = ?player, reason = "not_your_turn", "action rejected");
-                return Err("Not your turn to act".to_string());
-            }
-            _ => {}
+        // Validate it's this player's turn to act.
+        // CR 103.5: For simultaneous mulligan states, every pending player is
+        // an authorized actor — use set membership rather than equality with
+        // the (None-returning) representative.
+        let authorized = acting_players(&session.state);
+        if authorized.is_empty() {
+            warn!(game = %game_code, player = ?player, reason = "game_over", "action rejected");
+            return Err("Game is over".to_string());
+        }
+        if !authorized.contains(&player) {
+            warn!(game = %game_code, player = ?player, reason = "not_your_turn", "action rejected");
+            return Err("Not your turn to act".to_string());
         }
 
         // Mana abilities skip the legal_actions pre-check — they are excluded from
@@ -983,7 +1000,9 @@ mod tests {
         let session = mgr.sessions.get(&code).unwrap();
         let acting = match &session.state.waiting_for {
             WaitingFor::Priority { player } => *player,
-            WaitingFor::MulliganDecision { player, .. } => *player,
+            // CR 103.5: simultaneous mulligan — pick the first pending player
+            // as the "acting" target for the wrong-token test.
+            WaitingFor::MulliganDecision { pending, .. } => pending[0].player,
             other => panic!("unexpected waiting_for: {:?}", other),
         };
 
@@ -1076,14 +1095,21 @@ mod tests {
         for _ in 0..20 {
             let session = mgr.sessions.get(&code).unwrap();
             match &session.state.waiting_for.clone() {
-                WaitingFor::MulliganDecision { player, .. } => {
-                    let tok = if *player == PlayerId(0) {
-                        token0.clone()
-                    } else {
-                        token1.clone()
-                    };
-                    let _ =
-                        mgr.handle_action(&code, &tok, GameAction::MulliganDecision { keep: true });
+                // CR 103.5: simultaneous mulligan — submit a Keep for each
+                // pending player using their own token.
+                WaitingFor::MulliganDecision { pending, .. } => {
+                    for entry in pending {
+                        let tok = if entry.player == PlayerId(0) {
+                            token0.clone()
+                        } else {
+                            token1.clone()
+                        };
+                        let _ = mgr.handle_action(
+                            &code,
+                            &tok,
+                            GameAction::MulliganDecision { keep: true },
+                        );
+                    }
                 }
                 WaitingFor::Priority { .. } => break,
                 _ => break,
