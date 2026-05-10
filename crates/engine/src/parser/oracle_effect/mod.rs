@@ -12182,6 +12182,13 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
                 TargetFilter::ParentTargetController,
                 (
                     alt((
+                        // CR 115.1 + CR 118.12: "any target" effects (Rhystic
+                        // Lightning) restate the payer as a disjunctive
+                        // "[permanent's controller] or [that player]" — both
+                        // arms collapse to `ParentTargetController` because
+                        // that filter already unifies object-target controller
+                        // and player-target self-reference.
+                        tag("that permanent's controller or that player "),
                         tag("its controller "),
                         tag("that artifact's controller "),
                         tag("that creature's controller "),
@@ -13935,6 +13942,66 @@ mod tests {
         assert!(
             def.unless_pay.is_none(),
             "plain counter should have no unless_pay modifier"
+        );
+    }
+
+    /// CR 115.1 + CR 118.12 + CR 118.12a: "any target" effects (Rhystic
+    /// Lightning) restate the unless payer as a disjunctive
+    /// "[permanent's controller] or [that player]". Both arms collapse to
+    /// `ParentTargetController` because that filter unifies object-target
+    /// controller and player-target self-reference (see
+    /// `targeting::resolve_effect_player_ref`). Without this the parser's
+    /// `try_parse_choose_one_of_inline` would misfire on the inner ` or ` and
+    /// split the imperative into two malformed branches.
+    #[test]
+    fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller() {
+        use crate::types::mana::ManaCost;
+
+        let def = parse_effect_chain(
+            "Rhystic Lightning deals 4 damage to any target unless that permanent's controller or that player pays {2}. If they do, Rhystic Lightning deals 2 damage to the permanent or player.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 4 },
+                    ..
+                }
+            ),
+            "primary should be DealDamage 4, got {:?}",
+            def.effect
+        );
+        let unless_pay = def
+            .unless_pay
+            .expect("Rhystic Lightning must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2
+                }
+            },
+        );
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("Rhystic Lightning must chain the if-they-do alternative");
+        assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    ..
+                }
+            ),
+            "if-they-do alternative should be DealDamage 2, got {:?}",
+            sub.effect
         );
     }
 
