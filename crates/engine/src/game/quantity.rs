@@ -142,7 +142,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 player: PlayerScope::RecipientController,
             } => true,
             QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinctNames { filter }
+            | QuantityRef::ObjectCountDistinct { filter, .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             }
@@ -662,35 +662,59 @@ fn resolve_ref(
             };
             usize_to_i32_saturating(adjusted)
         }
-        // CR 201.2 + CR 603.4: Count of distinct names among matching objects.
-        // Field of the Dead: "seven or more lands with different names". Two
-        // objects with the same printed name count once.
+        // CR 201.2 + CR 603.4: Count of objects matching `filter`,
+        // deduplicated by the listed `qualities`. Each object contributes a
+        // tuple-key formed from its values per quality; objects whose tuples
+        // coincide count once. Objects with no value for a quality (empty
+        // name, missing power, etc.) get a per-object sentinel for that
+        // axis, so they are counted but not deduped against one another —
+        // matching the legacy `ObjectCountDistinctNames` invariant for
+        // unnamed objects.
         //
-        // CR 201.2a: Sameness is defined by printed name, so read `base_name`
-        // (not the layer-applied `name`) to match how CR defines object
-        // identity. Objects with no name do not share a name with any other
-        // object, including one another — they are each individually unique,
-        // so they are counted but not deduped.
-        QuantityRef::ObjectCountDistinctNames { filter } => {
+        // Lifts the legacy `ObjectCountDistinctNames` resolver onto the same
+        // `Vec<SharedQuality>` axis used by
+        // `SearchSelectionConstraint::DistinctQualities`. Both sides share
+        // the `crate::game::filter::object_shared_quality_values` extractor,
+        // keeping the count-expression and constraint vocabularies aligned.
+        QuantityRef::ObjectCountDistinct { filter, qualities } => {
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
-            let mut distinct_named: std::collections::HashSet<String> =
+            // Per-object signature: for each quality, a sorted Vec<String> of
+            // the object's values for that quality. Empty values get a
+            // per-object sentinel so unnamed/unstatted objects each count as
+            // distinct on that axis (preserving the legacy invariant).
+            let mut signatures: std::collections::HashSet<Vec<Vec<String>>> =
                 std::collections::HashSet::new();
-            let mut unnamed_count: usize = 0;
             for id in crate::game::targeting::zone_object_ids(state, zone) {
                 if !matches_target_filter(state, id, filter, &filter_ctx) {
                     continue;
                 }
-                if let Some(obj) = state.objects.get(&id) {
-                    if obj.base_name.is_empty() {
-                        unnamed_count += 1;
-                    } else {
-                        distinct_named.insert(obj.base_name.clone());
-                    }
-                }
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                let signature: Vec<Vec<String>> = qualities
+                    .iter()
+                    .map(|quality| {
+                        let values = crate::game::filter::object_shared_quality_values_public(
+                            obj,
+                            quality,
+                            &state.all_creature_types,
+                        );
+                        if values.is_empty() {
+                            // Per-object sentinel: empty-value objects are
+                            // each individually unique on this axis.
+                            vec![format!("__unique_{}__", id.0)]
+                        } else {
+                            let mut sorted: Vec<String> = values.into_iter().collect();
+                            sorted.sort();
+                            sorted
+                        }
+                    })
+                    .collect();
+                signatures.insert(signature);
             }
-            usize_to_i32_saturating(distinct_named.len() + unnamed_count)
+            usize_to_i32_saturating(signatures.len())
         }
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
@@ -2299,7 +2323,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AggregateFunction, ChoiceValue, ControllerRef, DevotionColors, Effect, FilterProp,
-        KickerVariant, ObjectProperty, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
@@ -2887,12 +2912,61 @@ mod tests {
             properties: vec![],
         });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames { filter },
+            qty: QuantityRef::ObjectCountDistinct {
+                filter,
+                qualities: vec![SharedQuality::Name],
+            },
         };
         // 3 distinct names controlled by P0: Plains, Island, Field of the Dead.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
         // P1's POV: only the one opponent Plains would be theirs, so 1.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
+    }
+
+    /// M7 lift regression: switching the dedup axis from Name → ManaValue must
+    /// produce the count of distinct mana values among the matching objects.
+    /// Proves the parameterized resolver dispatches on `qualities` rather than
+    /// hardcoding the legacy name-only path.
+    #[test]
+    fn resolve_quantity_object_count_distinct_mana_values_uses_mana_value_axis() {
+        let mut state = GameState::new_two_player(42);
+        // Three objects: two with mana value 2 (one shared bucket), one with
+        // mana value 4. Distinct mana values = 2.
+        for cost in &[
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            },
+        ] {
+            let id = create_object(
+                &mut state,
+                CardId(200),
+                PlayerId(0),
+                "Generic Card".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().mana_cost = cost.clone();
+        }
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinct {
+                filter,
+                qualities: vec![SharedQuality::ManaValue],
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
     }
 
     #[test]

@@ -846,15 +846,46 @@ fn search_filter_all_land_subtype_branches(filter: &TargetFilter) -> bool {
 /// and canonical core unions such as `"instant or sorcery card"` on the
 /// existing suffix/type-phrase paths.
 fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
-    #[derive(Clone, Copy)]
-    enum Disjunction {
-        OrA,
-        OrAn,
-        OrBasic,
-        AndOrA,
-        AndOrAn,
-        AndOrBare,
-        BareOr,
+    /// The two structural axes of a search-filter disjunction. Replaces the
+    /// flat 7-variant `Disjunction` cluster — every consumer site checks
+    /// `connector` (Or vs AndOr) and `leading` (article shape) independently,
+    /// which is what the parameterized form exposes directly.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Connector {
+        Or,
+        AndOr,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Leading {
+        A,
+        An,
+        Basic,
+        None,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Disjunction {
+        connector: Connector,
+        leading: Leading,
+    }
+
+    // Sub-combinator that dispatches the leading-article axis on a single
+    // alt() — shared between the and/or and or scans so future leading
+    // variants (e.g., AndOrBasic) require one arm, not one per connector.
+    fn parse_leading<'a>(
+        connector: Connector,
+        connector_tag: &'static str,
+    ) -> impl Parser<&'a str, Output = Disjunction, Error = OracleError<'a>> {
+        move |i: &'a str| {
+            let (i, _) = tag::<_, _, OracleError<'a>>(connector_tag).parse(i)?;
+            let (i, leading) = alt((
+                value(Leading::A, tag::<_, _, OracleError<'a>>("a ")),
+                value(Leading::An, tag::<_, _, OracleError<'a>>("an ")),
+                value(Leading::Basic, tag::<_, _, OracleError<'a>>("basic ")),
+                value(Leading::None, tag::<_, _, OracleError<'a>>("")),
+            ))
+            .parse(i)?;
+            Ok((i, Disjunction { connector, leading }))
+        }
     }
 
     let mut segments = Vec::new();
@@ -862,23 +893,14 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
     loop {
         let mut and_or_scan = (
             take_until::<_, _, OracleError<'_>>(" and/or "),
-            alt((
-                value(Disjunction::AndOrA, tag(" and/or a ")),
-                value(Disjunction::AndOrAn, tag(" and/or an ")),
-                value(Disjunction::AndOrBare, tag(" and/or ")),
-            )),
+            parse_leading(Connector::AndOr, " and/or "),
         );
         let parsed = if let Ok(found) = and_or_scan.parse(remaining) {
             Some(found)
         } else {
             let mut or_scan = (
                 take_until::<_, _, OracleError<'_>>(" or "),
-                alt((
-                    value(Disjunction::OrA, tag(" or a ")),
-                    value(Disjunction::OrAn, tag(" or an ")),
-                    value(Disjunction::OrBasic, tag(" or basic ")),
-                    value(Disjunction::BareOr, tag(" or ")),
-                )),
+                parse_leading(Connector::Or, " or "),
             );
             or_scan.parse(remaining).ok()
         };
@@ -888,7 +910,11 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         };
 
-        if matches!(disjunction, Disjunction::BareOr)
+        // Bare " or " gates: only fires with no article, and the right side
+        // must look like a card-bearing alternative for the current grammar
+        // (otherwise comparator suffixes "or less" would split incorrectly).
+        if disjunction.connector == Connector::Or
+            && disjunction.leading == Leading::None
             && !bare_search_disjunction_allowed(before.trim(), rest.trim_start())
         {
             if segments.is_empty() {
@@ -898,7 +924,13 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             break;
         }
 
-        if matches!(disjunction, Disjunction::AndOrBare) && before.as_bytes().contains(&b',') {
+        // Bare " and/or " gate: a comma in the left segment indicates an
+        // enumeration ("X, Y, and/or Z") that the upstream split has already
+        // mishandled — bail rather than over-split.
+        if disjunction.connector == Connector::AndOr
+            && disjunction.leading == Leading::None
+            && before.as_bytes().contains(&b',') // structural: not dispatch (comma presence check)
+        {
             if segments.is_empty() {
                 return vec![filter_region.trim()];
             }
@@ -907,17 +939,13 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
         }
 
         segments.push(before.trim());
-        remaining = match disjunction {
-            Disjunction::OrA
-            | Disjunction::OrAn
-            | Disjunction::AndOrA
-            | Disjunction::AndOrAn
-            | Disjunction::AndOrBare
-            | Disjunction::BareOr => rest,
-            Disjunction::OrBasic => {
-                let start = filter_region.len() - rest.len() - "basic ".len();
-                &filter_region[start..]
-            }
+        remaining = if disjunction.leading == Leading::Basic {
+            // "basic" is a supertype, not an article — recover it into the
+            // right segment so the type-phrase parser sees "basic <type>".
+            let start = filter_region.len() - rest.len() - "basic ".len();
+            &filter_region[start..]
+        } else {
+            rest
         };
     }
 
@@ -1661,6 +1689,35 @@ fn add_default_battlefield_zone(filter: TargetFilter) -> TargetFilter {
     }
 }
 
+/// CR 701.23a: Parse a possessive-scoped zone phrase (`"your library"`,
+/// `"an opponent's library"`, etc.) into the typed `(Zone, ControllerRef)`
+/// pair the engine consumes. Composes from `tag()` arms over the connector
+/// × zone axes so future graveyard / hand variants add a single combinator
+/// arm rather than a new sibling on every consumer.
+fn parse_possessive_zone(
+    input: &str,
+) -> nom::IResult<&str, (Zone, ControllerRef), OracleError<'_>> {
+    alt((
+        value(
+            (Zone::Library, ControllerRef::You),
+            tag::<_, _, OracleError<'_>>("your library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("an opponent's library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("target opponent's library"),
+        ),
+        value(
+            (Zone::Library, ControllerRef::Opponent),
+            tag("opponent's library"),
+        ),
+    ))
+    .parse(input)
+}
+
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
 fn parse_search_filter_suffixes(
@@ -1799,13 +1856,19 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) =
-            tag::<_, _, OracleError<'_>>("of the most prevalent creature type in your library")
-                .parse(remaining)
+        // CR 205.3m + CR 701.23a: "of the most prevalent creature type in
+        // <possessive zone>". Parameterized over `(Zone, ControllerRef)` so
+        // future opponent's-library / graveyard variants reuse this slot
+        // instead of spawning a sibling tag arm per phrasing.
+        if let Ok((rest, (zone, scope))) = preceded(
+            tag::<_, _, OracleError<'_>>("of the most prevalent creature type in "),
+            parse_possessive_zone,
+        )
+        .parse(remaining)
         {
             suffix
                 .properties
-                .push(FilterProp::MostPrevalentCreatureTypeInLibrary);
+                .push(FilterProp::MostPrevalentCreatureTypeIn { zone, scope });
             remaining = rest.trim_start();
             continue;
         }
@@ -3479,12 +3542,38 @@ mod tests {
         ));
         assert!(filter
             .properties
-            .contains(&FilterProp::MostPrevalentCreatureTypeInLibrary));
+            .contains(&FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            }));
         assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
             diagnostic,
             OracleDiagnostic::TargetFallback { context, .. }
                 if context == "search-filter-suffix unmatched"
         )));
+    }
+
+    /// CR 205.3m + CR 701.23a: L1 lift regression — opponent-scoped
+    /// possessive must dispatch into the same parameterized filter without
+    /// spawning a new variant. The test pins the (Zone, ControllerRef) axis
+    /// combination proving the parser composes both scopes from one
+    /// combinator.
+    #[test]
+    fn seek_most_prevalent_creature_type_in_opponents_library_uses_opponent_scope() {
+        let mut ctx = ParseContext::default();
+        let details = parse_seek_details(
+            "seek a creature card of the most prevalent creature type in an opponent's library",
+            &mut ctx,
+        );
+        let TargetFilter::Typed(filter) = details.filter else {
+            panic!("expected typed filter, got {:?}", details.filter);
+        };
+        assert!(filter
+            .properties
+            .contains(&FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::Opponent,
+            }));
     }
 
     #[test]
@@ -3607,5 +3696,114 @@ mod tests {
             details.selection_constraint,
             SearchSelectionConstraint::None
         );
+    }
+
+    // M6 regression: each old `Disjunction` variant maps to an observable
+    // split outcome from `split_filter_disjunctions`. Covers all 7 cluster
+    // members through their observable split behavior, proving the
+    // parameterized `connector × leading` axis combination still drives the
+    // same segmentation. Bare " or " requires a card-bearing right side
+    // (covered by `bare_search_disjunction_allowed`); bare " and/or " runs
+    // unconditionally.
+
+    // M6 regression: each old `Disjunction` variant maps to an observable
+    // split outcome from `split_filter_disjunctions`. The leading article is
+    // consumed by the connector parser (matching the legacy tag form) so the
+    // right segment is the article-less remainder; only the `Basic` axis
+    // recovers the supertype word into the right segment for downstream
+    // type-phrase parsing.
+
+    #[test]
+    fn split_disjunction_or_a_recovers_article_less_right_segment() {
+        // Old Disjunction::OrA → Or × A
+        let segments = split_filter_disjunctions("creature card or a noncreature card");
+        assert_eq!(segments, vec!["creature card", "noncreature card"]);
+    }
+
+    #[test]
+    fn split_disjunction_or_an_recovers_article_less_right_segment() {
+        // Old Disjunction::OrAn → Or × An
+        let segments = split_filter_disjunctions("creature card or an artifact card");
+        assert_eq!(segments, vec!["creature card", "artifact card"]);
+    }
+
+    #[test]
+    fn split_disjunction_or_basic_recovers_basic_into_right_segment() {
+        // Old Disjunction::OrBasic → Or × Basic — "basic" must stay on the
+        // right segment so the type-phrase parser sees "basic <type>".
+        let segments = split_filter_disjunctions("Mountain or basic Forest card");
+        assert_eq!(segments, vec!["Mountain", "basic Forest card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_a_recovers_article_less_right_segment() {
+        // Old Disjunction::AndOrA → AndOr × A
+        let segments = split_filter_disjunctions("creature card and/or a sorcery card");
+        assert_eq!(segments, vec!["creature card", "sorcery card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_an_recovers_article_less_right_segment() {
+        // Old Disjunction::AndOrAn → AndOr × An
+        let segments = split_filter_disjunctions("creature card and/or an artifact card");
+        assert_eq!(segments, vec!["creature card", "artifact card"]);
+    }
+
+    #[test]
+    fn split_disjunction_and_or_bare_recovers_left_and_right_segments() {
+        // Old Disjunction::AndOrBare → AndOr × None
+        let segments = split_filter_disjunctions("creatures and/or planeswalkers");
+        assert_eq!(segments, vec!["creatures", "planeswalkers"]);
+    }
+
+    #[test]
+    fn split_disjunction_bare_or_with_card_bearing_right_splits_segments() {
+        // Old Disjunction::BareOr → Or × None (gated by
+        // `bare_search_disjunction_allowed` — right must look like a card).
+        let segments = split_filter_disjunctions("Mountain or Cave card");
+        assert_eq!(segments, vec!["Mountain", "Cave card"]);
+    }
+
+    /// M7 backward-compat: a serialized JSON snapshot using the legacy
+    /// `ObjectCountDistinctNames` tag (single `filter` field, no `qualities`)
+    /// must deserialize to the new parameterized `ObjectCountDistinct` shape
+    /// with `qualities = vec![SharedQuality::Name]`. Mirrors Batch 5's
+    /// approach for forward-compatible enum lifts.
+    #[test]
+    fn legacy_object_count_distinct_names_json_deserializes_with_default_qualities() {
+        let legacy_json = serde_json::json!({
+            "type": "ObjectCountDistinctNames",
+            "filter": { "type": "Any" }
+        });
+        let qty: QuantityRef =
+            serde_json::from_value(legacy_json).expect("legacy tag deserializes");
+        match qty {
+            QuantityRef::ObjectCountDistinct {
+                filter: _,
+                qualities,
+            } => {
+                assert_eq!(qualities, vec![SharedQuality::Name]);
+            }
+            other => panic!("expected ObjectCountDistinct, got {other:?}"),
+        }
+    }
+
+    /// M7 backward-compat: legacy `MostPrevalentCreatureTypeInLibrary` tag
+    /// deserializes to the new parameterized variant with default
+    /// `zone = Library` and `scope = You`.
+    #[test]
+    fn legacy_most_prevalent_creature_type_json_deserializes_with_default_axes() {
+        let legacy_json = serde_json::json!({
+            "type": "MostPrevalentCreatureTypeInLibrary"
+        });
+        let prop: FilterProp =
+            serde_json::from_value(legacy_json).expect("legacy tag deserializes");
+        match prop {
+            FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+                assert_eq!(zone, Zone::Library);
+                assert_eq!(scope, ControllerRef::You);
+            }
+            other => panic!("expected MostPrevalentCreatureTypeIn, got {other:?}"),
+        }
     }
 }

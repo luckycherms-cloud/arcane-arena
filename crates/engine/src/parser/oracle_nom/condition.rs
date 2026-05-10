@@ -17,7 +17,7 @@ use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
     CountScope, DamageGroupKey, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -794,7 +794,7 @@ fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 201.2 + CR 603.4: "you control N or more [type] with different names"
-        // → QuantityComparison(ObjectCountDistinctNames >= N). Tried before the
+        // → QuantityComparison(ObjectCountDistinct[Name] >= N). Tried before the
         // plain ObjectCount arm so the `with different names` suffix is not
         // mis-classified as a raw count threshold. Field of the Dead canonical.
         parse_control_count_ge_distinct_names,
@@ -842,7 +842,7 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 }
 
 /// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
-/// → `QuantityComparison { ObjectCountDistinctNames(filter) >= N }`.
+/// → `QuantityComparison { ObjectCountDistinct[Name](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
 /// names". Two objects with the same printed name count once. General enough
@@ -868,7 +868,10 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
         &input[consumed..],
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCountDistinctNames { filter },
+                qty: QuantityRef::ObjectCountDistinct {
+                    filter,
+                    qualities: vec![SharedQuality::Name],
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -3679,14 +3682,17 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 7 });
                 match lhs {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCountDistinctNames { filter },
-                    } => match filter {
-                        TargetFilter::Typed(t) => {
-                            assert_eq!(t.controller, Some(ControllerRef::You));
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    } => {
+                        assert_eq!(qualities, vec![SharedQuality::Name]);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                            }
+                            _ => panic!("expected Typed filter, got {:?}", filter),
                         }
-                        _ => panic!("expected Typed filter, got {:?}", filter),
-                    },
-                    _ => panic!("expected ObjectCountDistinctNames, got {:?}", lhs),
+                    }
+                    _ => panic!("expected ObjectCountDistinct, got {:?}", lhs),
                 }
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),

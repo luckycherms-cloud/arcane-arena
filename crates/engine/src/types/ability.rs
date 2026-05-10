@@ -1522,10 +1522,24 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
-    /// Matches creature cards that have a creature type tied for the highest
-    /// count among creature cards in their owner's library. Used by Alchemy
-    /// "most prevalent creature type in your library" seek filters.
-    MostPrevalentCreatureTypeInLibrary,
+    /// CR 205.3m + CR 701.23a: Matches creature cards whose creature type is
+    /// tied for the highest count among creature cards in the named player's
+    /// named zone. CR 205.3m defines the creature subtype set being counted;
+    /// CR 701.23a is the search mechanic that surfaces this filter.
+    /// Generalizes the original "most prevalent creature type in your library"
+    /// leaf so future variants (opponent's library, graveyard, etc.) reuse
+    /// this slot rather than spawning siblings.
+    ///
+    /// Backward compat: deserializes from the legacy tag
+    /// `MostPrevalentCreatureTypeInLibrary` (no fields) via `#[serde(alias)]`,
+    /// defaulting `zone = Library` and `scope = You`.
+    #[serde(alias = "MostPrevalentCreatureTypeInLibrary")]
+    MostPrevalentCreatureTypeIn {
+        #[serde(default = "default_most_prevalent_zone")]
+        zone: crate::types::zones::Zone,
+        #[serde(default = "default_most_prevalent_scope")]
+        scope: ControllerRef,
+    },
     /// Matches objects whose colors include the source object's chosen color.
     /// Used for "of the chosen color" patterns (Hall of Triumph, Runed Stalactite).
     /// Reads `ChosenAttribute::Color` from the source permanent.
@@ -2120,11 +2134,27 @@ pub enum QuantityRef {
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
-    /// CR 201.2 + CR 603.4: Count of distinct names among objects matching a
-    /// filter. Used for "seven or more lands with different names" (Field of
-    /// the Dead) and similar distinct-name threshold predicates. Two objects
-    /// with the same name count once.
-    ObjectCountDistinctNames { filter: TargetFilter },
+    /// CR 201.2 + CR 603.4: Count of objects matching a filter, deduplicated
+    /// by the listed shared qualities. `qualities = [Name]` is the canonical
+    /// "seven or more lands with different names" shape (Field of the Dead);
+    /// `qualities = [ManaValue]` covers "different mana values"; multiple
+    /// qualities form a tuple key (objects whose tuple values all coincide
+    /// count as one).
+    ///
+    /// Lifts the legacy `ObjectCountDistinctNames` leaf to the same
+    /// `Vec<SharedQuality>` axis already used by
+    /// `SearchSelectionConstraint::DistinctQualities` (Batch 1) so the
+    /// count-expression and constraint sides share one quality vocabulary.
+    ///
+    /// Backward compat: deserializes from the legacy tag
+    /// `ObjectCountDistinctNames` (single `filter` field) via
+    /// `#[serde(alias)]`, defaulting `qualities` to `vec![SharedQuality::Name]`.
+    #[serde(alias = "ObjectCountDistinctNames")]
+    ObjectCountDistinct {
+        filter: TargetFilter,
+        #[serde(default = "default_distinct_names")]
+        qualities: Vec<SharedQuality>,
+    },
     /// Count of players matching a player-level filter.
     /// Used for "for each opponent who lost life this turn" and similar patterns.
     PlayerCount { filter: PlayerFilter },
@@ -5182,6 +5212,27 @@ fn default_counter_transfer_mode() -> CounterTransferMode {
 
 fn default_damage_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
+}
+
+/// Backward-compat default for the legacy
+/// `FilterProp::MostPrevalentCreatureTypeInLibrary` shape. Old saves had no
+/// `zone` field; it always meant the player's library.
+fn default_most_prevalent_zone() -> crate::types::zones::Zone {
+    crate::types::zones::Zone::Library
+}
+
+/// Backward-compat default for the legacy
+/// `QuantityRef::ObjectCountDistinctNames` shape. Old saves had no
+/// `qualities` field; the count was always deduplicated by name.
+fn default_distinct_names() -> Vec<SharedQuality> {
+    vec![SharedQuality::Name]
+}
+
+/// Backward-compat default for the legacy
+/// `FilterProp::MostPrevalentCreatureTypeInLibrary` shape. Old saves had no
+/// `scope` field; it always meant `your` library.
+fn default_most_prevalent_scope() -> ControllerRef {
+    ControllerRef::You
 }
 
 fn is_default_damage_aggregate(a: &AggregateFunction) -> bool {

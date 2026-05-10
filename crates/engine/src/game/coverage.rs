@@ -428,8 +428,19 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("{value}").to_lowercase());
             }
             FilterProp::IsChosenCreatureType => parts.push("chosen creature type".into()),
-            FilterProp::MostPrevalentCreatureTypeInLibrary => {
-                parts.push("most prevalent creature type in library".into());
+            FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+                let scope_str = match scope {
+                    ControllerRef::You => "your",
+                    ControllerRef::Opponent => "opponent's",
+                    ControllerRef::ScopedPlayer => "that player's",
+                    ControllerRef::TargetPlayer => "target player's",
+                    ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::DefendingPlayer => "defending player's",
+                };
+                let zone_str = format!("{zone:?}").to_lowercase();
+                parts.push(format!(
+                    "most prevalent creature type in {scope_str} {zone_str}"
+                ));
             }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
             FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
@@ -723,8 +734,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::Speed => "speed".into(),
         QuantityRef::ObjectCount { filter } => format!("# of {}", fmt_target(filter)),
-        QuantityRef::ObjectCountDistinctNames { filter } => {
-            format!("# of distinctly-named {}", fmt_target(filter))
+        QuantityRef::ObjectCountDistinct { filter, qualities } => {
+            let quality_str = if qualities.iter().all(|q| matches!(q, SharedQuality::Name)) {
+                "distinctly-named".into()
+            } else {
+                let parts: Vec<String> = qualities
+                    .iter()
+                    .map(|q| format!("{q:?}").to_lowercase())
+                    .collect();
+                format!("distinct-{}", parts.join("-"))
+            };
+            format!("# of {} {}", quality_str, fmt_target(filter))
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOn {
@@ -4689,7 +4709,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::Speed => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
-        QuantityRef::ObjectCountDistinctNames { .. } => ("ObjectCountDistinctNames", Handled),
+        QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),

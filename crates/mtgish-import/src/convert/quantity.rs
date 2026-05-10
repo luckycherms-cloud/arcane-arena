@@ -341,15 +341,17 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         ),
 
         // CR 201.2 + CR 603.4: "the number of [permanents] with different
-        // names" → ObjectCountDistinctNames. Other GroupFilter variants
+        // names" → ObjectCountDistinct[Name]. Other GroupFilter variants
         // (DifferentControllers, SameToughness, …) lack a dedicated primitive
         // and strict-fail.
         GameNumber::NumGroupPermanents(filter, group) => {
             use crate::schema::types::GroupFilter;
+            use engine::types::ability::SharedQuality;
             match group {
                 GroupFilter::DifferentNames => QuantityExpr::Ref {
-                    qty: QuantityRef::ObjectCountDistinctNames {
+                    qty: QuantityRef::ObjectCountDistinct {
                         filter: convert_permanents(filter)?,
+                        qualities: vec![SharedQuality::Name],
                     },
                 },
                 other => {

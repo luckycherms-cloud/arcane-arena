@@ -1306,7 +1306,7 @@ fn spell_object_matches_property(
                     )
                 })
         }),
-        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         FilterProp::IsChosenColor => context.is_some_and(|context| {
             context
                 .state
@@ -1461,7 +1461,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ToughnessGE { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
-        | FilterProp::MostPrevalentCreatureTypeInLibrary
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
@@ -1987,8 +1987,16 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
-        FilterProp::MostPrevalentCreatureTypeInLibrary => {
-            most_prevalent_creature_types_in_library(state, obj.owner)
+        // CR 205.3m + CR 701.23a: Object's creature type ties for highest count
+        // among creature cards in the named player's named zone. Scope picks
+        // the player whose zone is inspected; `Opponent` falls back to the
+        // candidate object's owner (search-context invariant — the candidate
+        // already lives in the inspected zone, so its owner IS that player).
+        FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+            let owner =
+                controller_ref_player(state, source.id, source.controller, source.ability, scope)
+                    .unwrap_or(obj.owner);
+            most_prevalent_creature_types_in_zone(state, owner, *zone)
                 .into_iter()
                 .any(|creature_type| {
                     subtype_matches_with_changeling(
@@ -2296,7 +2304,7 @@ fn zone_change_record_matches_property(
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
         }),
-        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -2566,6 +2574,18 @@ fn shared_quality_values(
     }
 }
 
+/// CR 201.2 + CR 603.4: Public re-export of the per-object quality extractor.
+/// Used by the `QuantityRef::ObjectCountDistinct` resolver so the
+/// count-expression side and the constraint side share one vocabulary for
+/// `SharedQuality` value semantics.
+pub fn object_shared_quality_values_public(
+    obj: &GameObject,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    object_shared_quality_values(obj, quality, all_creature_types)
+}
+
 fn object_shared_quality_values(
     obj: &GameObject,
     quality: &SharedQuality,
@@ -2705,16 +2725,30 @@ fn object_shares_quality_with_reference_filter(
     })
 }
 
-fn most_prevalent_creature_types_in_library(state: &GameState, owner: PlayerId) -> HashSet<String> {
-    let Some(player) = state.players.iter().find(|player| player.id == owner) else {
-        return HashSet::new();
-    };
-
-    let mut counts = HashMap::new();
-    for object_id in &player.library {
-        let Some(obj) = state.objects.get(object_id) else {
+/// CR 205.3m + CR 701.23a: Compute the creature subtypes tied for highest
+/// occurrence among creature cards in `owner`'s `zone`. CR 205.3m defines
+/// the creature-subtype set being counted. A `Changeling` (CR 702.73a)
+/// creature counts toward every creature type, matching how the keyword
+/// interacts with subtype-counting effects on resolution.
+///
+/// Owner semantics are correct for hidden zones (library, hand) and
+/// graveyard/exile per CR 400 (zones are owned by players). Battlefield
+/// emission, if/when added, would need an explicit controller axis since
+/// owner ≠ controller for stolen permanents.
+fn most_prevalent_creature_types_in_zone(
+    state: &GameState,
+    owner: PlayerId,
+    zone: Zone,
+) -> HashSet<String> {
+    let object_ids = crate::game::targeting::zone_object_ids(state, zone);
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for object_id in object_ids {
+        let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        if obj.owner != owner {
+            continue;
+        }
         if !obj.card_types.core_types.contains(&CoreType::Creature) {
             continue;
         }
@@ -3977,10 +4011,12 @@ mod tests {
             obj.card_types.subtypes.push(subtype.to_string());
         }
 
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature()
-                .properties(vec![FilterProp::MostPrevalentCreatureTypeInLibrary]),
-        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            },
+        ]));
 
         assert!(matches_target_filter(
             &state, goblin_one, &filter, goblin_one

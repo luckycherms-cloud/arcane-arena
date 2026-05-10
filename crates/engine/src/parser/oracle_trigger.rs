@@ -1291,7 +1291,7 @@ fn substitute_another_in_filter(filter: &TargetFilter) -> TargetFilter {
     }
 }
 
-/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinctNames`
+/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinct`
 /// filter carried by a `QuantityExpr`. Leaves non-object-count refs untouched.
 fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
     match expr {
@@ -1303,10 +1303,11 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             },
         },
         QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames { filter },
+            qty: QuantityRef::ObjectCountDistinct { filter, qualities },
         } => QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames {
+            qty: QuantityRef::ObjectCountDistinct {
                 filter: substitute_another_in_filter(filter),
+                qualities: qualities.clone(),
             },
         },
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
