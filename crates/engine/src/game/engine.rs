@@ -11198,6 +11198,220 @@ mod phase_trigger_regression_tests {
         assert!(state.pending_continuation.is_some());
     }
 
+    /// CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they do,
+    /// [alternative]." When the unless cost is paid, the primary effect is
+    /// suppressed AND the IfAPlayerDoes sub_ability runs as the alternative
+    /// outcome. Cards: Rhystic Lightning, Don't Make a Sound, Divert Disaster,
+    /// Assimilate Essence.
+    #[test]
+    fn unless_pay_success_runs_if_a_player_does_sub_ability() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Rhystic Lightning Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Primary effect: gain 4 life. Alternative: gain 2 life.
+        // Using GainLife rather than DealDamage so the test stays self-contained
+        // (no target wiring required) — the runtime branching being verified is
+        // sub_ability resolution, not damage routing.
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        // Player 1 (the unless payer) starts with 20 life and 2 energy to pay.
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        // Cost was deducted from the unless payer.
+        assert_eq!(state.players[1].energy, 0);
+        // Primary suppressed (no +4 life), alternative ran (+2 life from sub_ability).
+        assert_eq!(state.players[0].life, starting_life + 2);
+    }
+
+    /// CR 118.12: When the unless cost is declined, the primary effect runs
+    /// and the IfAPlayerDoes sub_ability does NOT run (its condition reads
+    /// `optional_effect_performed` which stays false on the decline path).
+    #[test]
+    fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Rhystic Lightning Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        // Primary ran (+4 life), alternative did NOT (no extra +2 life).
+        assert_eq!(state.players[0].life, starting_life + 4);
+    }
+
+    /// CR 118.12: An unless_pay effect with NO sub_ability still resolves
+    /// cleanly when the cost is paid (primary suppressed, no spurious chain
+    /// resolution).
+    #[test]
+    fn unless_pay_success_with_no_sub_ability_is_inert() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(0),
+            "Plain Unless Effect".to_string(),
+            Zone::Battlefield,
+        );
+
+        let primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[1].energy, 0);
+        // Primary suppressed; no sub_ability to run.
+        assert_eq!(state.players[0].life, starting_life);
+    }
+
+    /// Abandon Attachments #81 parallel: a stale `cost_payment_failed_flag`
+    /// from a previous resolution must NOT block the IfAPlayerDoes sub_ability
+    /// when the unless cost is paid. The success path clears the flag the
+    /// same way `handle_optional_effect_choice` does for accepts.
+    #[test]
+    fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
+        let mut state = setup_game_at_main_phase();
+        // Simulate a previous resolution that left the flag set.
+        state.cost_payment_failed_flag = true;
+
+        let source_id = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "Stale Flag Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::IfAPlayerDoes);
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy { amount: 2 },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let starting_life = state.players[0].life;
+        let _ = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        // Alternative ran (+2 life), so the stale flag was correctly cleared.
+        assert_eq!(state.players[0].life, starting_life + 2);
+        assert!(
+            !state.cost_payment_failed_flag,
+            "cost_payment_failed_flag should be cleared by the success path"
+        );
+    }
+
     #[test]
     fn unless_energy_payment_deducts_energy_and_skips_effect() {
         let mut state = setup_game_at_main_phase();

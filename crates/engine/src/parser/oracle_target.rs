@@ -560,6 +560,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 tag("the source's controller"),
             ),
             value(TargetFilter::ParentTargetController, tag("its controller")),
+            // CR 115.1 + CR 608.2c: "the permanent or player" — anaphoric
+            // back-reference to the parent target on "any target" effects
+            // (Rhystic Lightning's "deals 2 damage to the permanent or
+            // player"). Longer phrase before "the player" / "the permanent"
+            // for longest-match-first dispatch.
+            value(TargetFilter::ParentTarget, tag("the permanent or player")),
+            value(TargetFilter::ParentTarget, tag("the permanent")),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),

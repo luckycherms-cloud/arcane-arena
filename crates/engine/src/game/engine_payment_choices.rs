@@ -446,6 +446,41 @@ pub(super) fn handle_unless_payment(
                 kind: EffectKind::from(&pending_effect.effect),
                 source_id: pending_effect.source_id,
             });
+
+            // CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost].
+            // If they do, [alternative]." When the payment succeeds, the
+            // primary effect is suppressed (above) and the `IfAPlayerDoes`
+            // sub_ability runs as the alternative outcome. Mirrors the
+            // `OpponentMayChoice` accept path (`engine_payment_choices.rs`
+            // L88-L94) which sets `optional_effect_performed=true` on the
+            // accepted ability so `evaluate_condition` honors `IfAPlayerDoes`
+            // (`effects/mod.rs` L2156-L2158). Cards: Rhystic Lightning,
+            // Don't Make a Sound, Divert Disaster, Assimilate Essence.
+            if let Some(sub) = pending_effect
+                .sub_ability
+                .as_ref()
+                .filter(|sub| matches!(sub.condition, Some(AbilityCondition::IfAPlayerDoes)))
+            {
+                // Abandon Attachments #81 parallel: a stale
+                // `cost_payment_failed_flag` from a previous resolution would
+                // make `evaluate_condition` reject the IfAPlayerDoes condition
+                // (`effects/mod.rs` L2156-L2158: `&& !cost_payment_failed_flag`).
+                // Clear it on the success path the same way
+                // `handle_optional_effect_choice` (L29) and
+                // `handle_opponent_may_choice` (L88) do for their accept paths.
+                state.cost_payment_failed_flag = false;
+                let mut sub_resolved = sub.as_ref().clone();
+                if sub_resolved.targets.is_empty() {
+                    sub_resolved.targets = pending_effect.targets.clone();
+                }
+                sub_resolved.context = pending_effect.context.clone();
+                sub_resolved.context.optional_effect_performed = true;
+                let previous_trigger_event = state.current_trigger_event.clone();
+                state.current_trigger_event = trigger_event.clone();
+                let result = effects::resolve_ability_chain(state, &sub_resolved, events, 0);
+                state.current_trigger_event = previous_trigger_event;
+                result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            }
         }
     }
 
