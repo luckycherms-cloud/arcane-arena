@@ -833,7 +833,36 @@ fn resolve_ref(
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
             let zone_ids = crate::game::targeting::zone_object_ids(state, zone);
+            // CR 603.4 + CR 109.3: If the filter carries
+            // `OtherThanTriggerObject`, exclude the triggering object from the
+            // aggregate population (Selvala-class "each other creature's
+            // power"). Mirrors the `ObjectCount` resolver's exclusion path
+            // above: per-object filter evaluation is a transparent
+            // pass-through for the marker; explicit subtraction happens here.
+            //
+            // When no trigger event carries an object subject, the marker
+            // degrades to source-exclusion via the same fallback used by
+            // `ObjectCount` (CR 109.3's general sense of "other").
+            let excluded_id = if filter_contains_other_than_trigger_object(filter) {
+                Some(
+                    state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(crate::game::targeting::extract_source_from_event)
+                        .or_else(|| {
+                            detection_trigger_event()
+                                .as_ref()
+                                .and_then(crate::game::targeting::extract_source_from_event)
+                        })
+                        .unwrap_or(source_id),
+                )
+            } else {
+                None
+            };
             let values = zone_ids.iter().filter_map(|&id| {
+                if excluded_id == Some(id) {
+                    return None;
+                }
                 if matches_target_filter(state, id, filter, &filter_ctx) {
                     state.objects.get(&id).map(|obj| match property {
                         ObjectProperty::Power => obj.power.unwrap_or(0),
@@ -5731,5 +5760,72 @@ mod tests {
             qty: QuantityRef::SelfManaValue,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 5);
+    }
+
+    /// CR 603.4 + CR 109.3 + CR 107.3e: The `Aggregate` resolver must exclude
+    /// the triggering object from its population when the filter carries
+    /// `FilterProp::OtherThanTriggerObject`. This mirrors the existing
+    /// `ObjectCount` exclusion path and supports the Selvala-class
+    /// "each other creature's power" superlative comparison.
+    #[test]
+    fn resolve_aggregate_other_than_trigger_object_excludes_triggering() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Selvala".to_string(),
+            Zone::Battlefield,
+        );
+        // Three creatures on the battlefield with power 2, 4, 6.
+        let c1 = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Bear A".to_string(),
+            Zone::Battlefield,
+        );
+        let c2 = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Bear B".to_string(),
+            Zone::Battlefield,
+        );
+        let triggering = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Triggering Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, p, t) in [(c1, 2i32, 2i32), (c2, 4, 4), (triggering, 6, 6)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(p);
+            obj.toughness = Some(t);
+        }
+        // Set the triggering event to be the entering of `triggering`.
+        state.current_trigger_event = Some(crate::types::events::GameEvent::ZoneChanged {
+            object_id: triggering,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                triggering,
+                None,
+                Zone::Battlefield,
+            )),
+        });
+
+        let aggregate = QuantityRef::Aggregate {
+            function: AggregateFunction::Max,
+            property: ObjectProperty::Power,
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::OtherThanTriggerObject]),
+            ),
+        };
+        let expr = QuantityExpr::Ref { qty: aggregate };
+        // Triggering creature (power 6) must be excluded; max of remaining is 4.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 4);
     }
 }

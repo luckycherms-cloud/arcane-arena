@@ -1292,7 +1292,8 @@ fn substitute_another_in_filter(filter: &TargetFilter) -> TargetFilter {
 }
 
 /// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinct`
-/// filter carried by a `QuantityExpr`. Leaves non-object-count refs untouched.
+/// or `Aggregate` filter carried by a `QuantityExpr`. Leaves non-population
+/// refs untouched.
 fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
     match expr {
         QuantityExpr::Ref {
@@ -1308,6 +1309,24 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             qty: QuantityRef::ObjectCountDistinct {
                 filter: substitute_another_in_filter(filter),
                 qualities: qualities.clone(),
+            },
+        },
+        // CR 107.3e + CR 603.4: Aggregate populations are also "object
+        // populations" in the same sense as ObjectCount — when an
+        // intervening-if references an aggregate over "each other <type>",
+        // the exclusion must be trigger-relative, not source-relative.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: *function,
+                property: *property,
+                filter: substitute_another_in_filter(filter),
             },
         },
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
@@ -14303,6 +14322,64 @@ mod tests {
             }
             other => panic!("expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    /// CR 208.1 + CR 603.4 + CR 109.3 + CR 107.3e: Selvala, Heart of the
+    /// Wilds — the ETB trigger fires unconditionally for every other creature,
+    /// but the "may draw a card" effect is gated on the triggering creature's
+    /// power being strictly greater than the max power of every other
+    /// creature. Regression for the silently-dropped intervening-if condition
+    /// (#333).
+    #[test]
+    fn trigger_intervening_if_selvala_power_greater_than_each_other() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters, its controller may draw a card if its power is greater than each other creature's power.",
+            "Selvala, Heart of the Wilds",
+        );
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        // LHS: the triggering creature's power.
+        assert_eq!(*comparator, Comparator::GT);
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::EventSource,
+                },
+            }
+        );
+        // RHS: Max(power) across creatures excluding the triggering object.
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::Aggregate {
+                    function,
+                    property,
+                    filter,
+                },
+        } = rhs
+        else {
+            panic!("expected Aggregate Max Power rhs, got {rhs:?}");
+        };
+        assert_eq!(*function, AggregateFunction::Max);
+        assert_eq!(*property, crate::types::ability::ObjectProperty::Power);
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed creature filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.contains(&FilterProp::OtherThanTriggerObject),
+            "expected OtherThanTriggerObject in aggregate filter, got {:?}",
+            tf.properties
+        );
     }
 }
 

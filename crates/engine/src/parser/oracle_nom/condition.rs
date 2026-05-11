@@ -16,8 +16,8 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    CountScope, DamageGroupKey, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
+    QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -52,6 +52,13 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_turn_conditions,
+        // CR 208.1 + CR 603.4 + CR 107.3e: Superlative-comparison gate
+        // ("if its power is greater than each other creature's power" /
+        // "if it has the greatest power among creatures on the battlefield").
+        // Must precede `parse_source_state_conditions` so the longer phrase
+        // wins over the fixed-N "its power is N or greater" combinator inside
+        // that group (which only matches numeric thresholds).
+        parse_subject_property_superlative_comparison,
         parse_source_state_conditions,
         parse_player_state_conditions,
         parse_you_have_conditions,
@@ -711,13 +718,13 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
     let (rest, qty) = alt((
         value(
             QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
+                scope: ObjectScope::Source,
             },
             tag("power is "),
         ),
         value(
             QuantityRef::Toughness {
-                scope: crate::types::ability::ObjectScope::Source,
+                scope: ObjectScope::Source,
             },
             tag("toughness is "),
         ),
@@ -738,6 +745,274 @@ fn parse_source_power_toughness_condition(input: &str) -> OracleResult<'_, Stati
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 208.1 + CR 113.6 + CR 603.4 + CR 109.3 + CR 107.3e:
+/// Parse superlative-comparison conditions of the form
+/// "its <property> is <comparator> each other <type>'s <property>" and the
+/// equivalent surface forms "it has the [greatest|lowest] <property> among
+/// <filter>" / "...or is tied for [greatest|lowest] <property> among
+/// <filter>". The subject anaphor ("its" / "it") binds to the triggering
+/// object (CR 603.4 + CR 109.3), the right-hand side aggregates the same
+/// property across every OTHER object of the filtered class via
+/// `FilterProp::OtherThanTriggerObject` (CR 603.4 + CR 109.3 — see the
+/// `OtherThanTriggerObject` doc), and the comparator selects the matching
+/// aggregate function (CR 107.3e — Max for "greater than"/"greatest"; Min for
+/// "less than"/"lowest"). Used by Selvala, Heart of the Wilds' ETB draw gate.
+///
+/// Outputs `StaticCondition::QuantityComparison` with:
+/// - LHS `QuantityRef::Power|Toughness|ObjectManaValue { scope:
+///   ObjectScope::EventSource }` — the triggering object's current property.
+/// - RHS `QuantityRef::Aggregate { function: Max|Min, property, filter }`
+///   where `filter` carries `FilterProp::OtherThanTriggerObject` to exclude
+///   the triggering object from the aggregate population at runtime.
+///
+/// The combinator emits `OtherThanTriggerObject` directly (not `Another`)
+/// because the pattern is semantically anchored to a trigger context: the
+/// "each other" phrase only makes sense relative to a single anchored
+/// subject (the triggering object). This sidesteps the static→ability
+/// condition bridge, which passes filters through unchanged.
+fn parse_subject_property_superlative_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Two surface forms are accepted:
+    //   A. "its <prop> is <comparator phrase> each/every other <type>'s <prop>"
+    //   B. "it has the [greatest|lowest] <prop> among <filter>"
+    //      (with optional "or is tied for [greatest|lowest] <prop> among
+    //      <filter>" extension that relaxes strict > to >=)
+    alt((
+        parse_subject_property_inequality_form,
+        parse_subject_has_superlative_form,
+    ))
+    .parse(input)
+}
+
+/// Surface form A: "its <prop> is <comparator phrase> each other <type>'s <prop>".
+fn parse_subject_property_inequality_form(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject anaphor: "its " — binds to the triggering object.
+    let (rest, _) = tag("its ").parse(input)?;
+    // Property on the LHS.
+    let (rest, lhs_property) = parse_property_keyword(rest)?;
+    // Connective: " is ".
+    let (rest, _) = tag(" is ").parse(rest)?;
+    // Comparator phrase yields (Comparator, AggregateFunction) — the aggregate
+    // function on the RHS is coupled to the comparator direction so the
+    // semantics are existential: GT/GE pair with Max, LT/LE pair with Min.
+    let (rest, (comparator, aggregate)) = parse_superlative_comparator_phrase(rest)?;
+    // Aggregate scope: "each other <type>'s <prop>" / "every other <type>'s <prop>".
+    let (rest, _) = alt((tag("each other "), tag("every other "))).parse(rest)?;
+    // <type> phrase. parse_type_phrase consumes "creature", "creature you
+    // control", etc. — without the "other" prefix (already stripped above so
+    // we control the exclusion semantics through OtherThanTriggerObject).
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    // Possessive "'s " + property keyword (must match LHS property).
+    let (rest, _) = tag("'s ").parse(rest)?;
+    let (rest, rhs_property) = parse_property_keyword(rest)?;
+    if lhs_property != rhs_property {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        rest,
+        build_superlative_comparison(filter, lhs_property, comparator, aggregate),
+    ))
+}
+
+/// Surface form B: "it has the greatest <prop> among <filter>" and the
+/// "...or is tied for greatest <prop> among <filter>" relaxation. The
+/// "among <filter>" clause is shared by both halves of the disjunction
+/// (when present), so it appears at the end of the full phrase.
+/// "lowest" / "least" map to Min; "greatest" / "highest" map to Max.
+fn parse_subject_has_superlative_form(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject: "it has the " or "~ has the ".
+    let (rest, _) = alt((tag("it has the "), tag("~ has the "))).parse(input)?;
+    // Superlative adjective → AggregateFunction.
+    let (rest, aggregate) = parse_superlative_adjective(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    // Property.
+    let (rest, property) = parse_property_keyword(rest)?;
+    // Optional "or is tied for <same superlative> <same property>" tail
+    // relaxes strict GT/LT to GE/LE. The tail does NOT carry its own
+    // "among <filter>" — the filter clause is shared and comes after.
+    let (rest, comparator) = parse_optional_tied_for_tail(rest, aggregate, property)?;
+    // " among <filter>".
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let consumed = rest.len() - remainder.len();
+    let rest = &rest[consumed..];
+    Ok((
+        rest,
+        build_superlative_comparison(filter, property, comparator, aggregate),
+    ))
+}
+
+/// Parse a superlative adjective into its corresponding `AggregateFunction`.
+fn parse_superlative_adjective(input: &str) -> OracleResult<'_, AggregateFunction> {
+    alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+        value(AggregateFunction::Min, tag("least")),
+    ))
+    .parse(input)
+}
+
+/// Property keyword parser — used by both LHS and RHS of the comparison.
+fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProperty> {
+    alt((
+        value(ObjectProperty::Power, tag("power")),
+        value(ObjectProperty::Toughness, tag("toughness")),
+        value(ObjectProperty::ManaValue, tag("mana value")),
+    ))
+    .parse(input)
+}
+
+/// Parse the comparator phrase between "is " and "each other ...".
+///
+/// The aggregate function is coupled to the comparator direction (CR 107.3e):
+/// GT/GE compare against the Max of the population (∃ object with greater
+/// property than each ⟺ subject > Max of others); LT/LE compare against Min.
+fn parse_superlative_comparator_phrase(
+    input: &str,
+) -> OracleResult<'_, (Comparator, AggregateFunction)> {
+    // Order matters: longer phrases ("greater than or equal to") must precede
+    // their prefixes ("greater than") so the longer form wins.
+    alt((
+        value(
+            (Comparator::GE, AggregateFunction::Max),
+            tag("greater than or equal to "),
+        ),
+        value(
+            (Comparator::LE, AggregateFunction::Min),
+            tag("less than or equal to "),
+        ),
+        value(
+            (Comparator::GT, AggregateFunction::Max),
+            tag("greater than "),
+        ),
+        value((Comparator::LT, AggregateFunction::Min), tag("less than ")),
+    ))
+    .parse(input)
+}
+
+/// Parse the optional "or is tied for [greatest|lowest] [property]" tail.
+/// Presence relaxes strict GT/LT to GE/LE. The matched superlative and
+/// property must agree with the leading clause. The shared trailing
+/// "among <filter>" is parsed by the caller.
+fn parse_optional_tied_for_tail(
+    input: &str,
+    aggregate: AggregateFunction,
+    property: ObjectProperty,
+) -> OracleResult<'_, Comparator> {
+    let strict_comparator = match aggregate {
+        AggregateFunction::Max => Comparator::GT,
+        AggregateFunction::Min => Comparator::LT,
+        // CR 107.3e: Sum aggregate is not produced by this combinator; default
+        // to GT for completeness.
+        AggregateFunction::Sum => Comparator::GT,
+    };
+    // The leading clause may end here (no "or is tied for" tail) — return GT/LT.
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or is tied for ").parse(input) else {
+        return Ok((input, strict_comparator));
+    };
+    // Match the same superlative as the leading clause.
+    let (rest, tied_aggregate) = parse_superlative_adjective(rest)?;
+    if tied_aggregate != aggregate {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, tied_property) = parse_property_keyword(rest)?;
+    if tied_property != property {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // CR 107.3e + CR 113.3: strict-greater + tied = non-strict (>=); same for
+    // less-than + tied = (<=).
+    let relaxed = match strict_comparator {
+        Comparator::GT => Comparator::GE,
+        Comparator::LT => Comparator::LE,
+        other => other,
+    };
+    Ok((rest, relaxed))
+}
+
+/// Build the `StaticCondition::QuantityComparison` for a superlative-comparison
+/// condition once all parts have been parsed.
+///
+/// `filter` is the population for the aggregate side; this function attaches
+/// `FilterProp::OtherThanTriggerObject` so the runtime aggregate resolver
+/// excludes the triggering object (CR 603.4 + CR 109.3).
+fn build_superlative_comparison(
+    filter: TargetFilter,
+    property: ObjectProperty,
+    comparator: Comparator,
+    aggregate: AggregateFunction,
+) -> StaticCondition {
+    let lhs_qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::EventSource,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::EventSource,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::EventSource,
+        },
+    };
+    let aggregate_filter = attach_other_than_trigger_object(filter);
+    StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref { qty: lhs_qty },
+        comparator,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: aggregate,
+                property,
+                filter: aggregate_filter,
+            },
+        },
+    }
+}
+
+/// Attach `FilterProp::OtherThanTriggerObject` to a `TargetFilter`'s property
+/// list so the runtime aggregate resolver excludes the triggering object.
+///
+/// CR 603.4 + CR 109.3: "each other <type>" in a trigger-anchored context
+/// means "every <type> except the triggering object." `OtherThanTriggerObject`
+/// is the established typed marker the resolver reads to perform the
+/// subtraction (see its doc on `FilterProp`).
+fn attach_other_than_trigger_object(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            if !tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::OtherThanTriggerObject))
+            {
+                tf.properties.push(FilterProp::OtherThanTriggerObject);
+            }
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
 }
 
 /// Parse "you have" quantity conditions: hand size, graveyard size, life.
@@ -7337,5 +7612,153 @@ mod tests {
         // — owner-tagging is meaningless on those shapes.
         let unchanged = add_owned_you_with_props(TargetFilter::Player, &[FilterProp::NonToken]);
         assert_eq!(unchanged, TargetFilter::Player);
+    }
+
+    /// CR 208.1 + CR 603.4 + CR 107.3e: Selvala-class superlative-comparison
+    /// gate — "its power is greater than each other creature's power" must
+    /// emit a `QuantityComparison` whose RHS is an aggregate (Max, Power)
+    /// over creatures excluding the triggering object.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_power_greater_than() {
+        let (rest, c) =
+            parse_inner_condition("its power is greater than each other creature's power.")
+                .unwrap();
+        assert_eq!(rest, ".");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                );
+                match rhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function,
+                                property,
+                                filter,
+                            },
+                    } => {
+                        assert_eq!(function, AggregateFunction::Max);
+                        assert_eq!(property, ObjectProperty::Power);
+                        match filter {
+                            TargetFilter::Typed(tf) => {
+                                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+                                assert!(
+                                    tf.properties.contains(&FilterProp::OtherThanTriggerObject),
+                                    "expected OtherThanTriggerObject, got {:?}",
+                                    tf.properties
+                                );
+                            }
+                            other => panic!("expected Typed creature, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Aggregate Max Power, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "less than" variant: aggregate function should switch to Min.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_power_less_than() {
+        let (_rest, c) =
+            parse_inner_condition("its power is less than each other creature's power.").unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { function, .. },
+                    },
+                ..
+            } => {
+                assert_eq!(comparator, Comparator::LT);
+                assert_eq!(function, AggregateFunction::Min);
+            }
+            other => panic!("expected QuantityComparison with Aggregate, got {other:?}"),
+        }
+    }
+
+    /// "greater than or equal to" variant: comparator should be GE, aggregate Max.
+    #[test]
+    fn parse_inner_condition_superlative_each_other_ge() {
+        let (_rest, c) = parse_inner_condition(
+            "its toughness is greater than or equal to each other creature's toughness.",
+        )
+        .unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Toughness {
+                                scope: ObjectScope::EventSource,
+                            },
+                    },
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function, property, ..
+                            },
+                    },
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(function, AggregateFunction::Max);
+                assert_eq!(property, ObjectProperty::Toughness);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "it has the greatest power among" surface form — equivalent to the
+    /// inequality form but as a "has the X" predicate. Strict GT.
+    #[test]
+    fn parse_inner_condition_superlative_has_greatest_power() {
+        let (_rest, c) =
+            parse_inner_condition("it has the greatest power among creatures on the battlefield.")
+                .unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Aggregate { function, .. },
+                    },
+                ..
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(function, AggregateFunction::Max);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// "it has the greatest power or is tied for greatest power among" — the
+    /// "or is tied for" tail relaxes strict GT to GE.
+    #[test]
+    fn parse_inner_condition_superlative_has_greatest_or_tied_for_greatest() {
+        let (_rest, c) = parse_inner_condition(
+            "it has the greatest power or is tied for greatest power among creatures on the battlefield.",
+        )
+        .unwrap();
+        match c {
+            StaticCondition::QuantityComparison { comparator, .. } => {
+                assert_eq!(comparator, Comparator::GE);
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
     }
 }
