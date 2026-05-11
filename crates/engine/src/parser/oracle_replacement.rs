@@ -6818,6 +6818,48 @@ mod tests {
     }
 
     #[test]
+    fn clone_enter_tapped_as_copy_callidus_assassin_grants_etb_trigger() {
+        let def = parse_replacement_line(
+            "Polymorphine — You may have this creature enter tapped as a copy of any creature on the battlefield, except it has \"When this creature enters, destroy up to one other target creature with the same name as this creature.\"",
+            "Callidus Assassin",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().unwrap();
+        let Effect::BecomeCopy {
+            additional_modifications,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("Expected BecomeCopy, got {:?}", sub.effect);
+        };
+        let [ContinuousModification::GrantTrigger { trigger }] =
+            additional_modifications.as_slice()
+        else {
+            panic!("expected one GrantTrigger, got {additional_modifications:?}");
+        };
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("granted trigger must execute");
+        let Effect::Destroy { target, .. } = &*execute.effect else {
+            panic!("expected Destroy effect, got {:?}", execute.effect);
+        };
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.contains(&FilterProp::Another));
+        assert!(filter.properties.contains(&FilterProp::SameName));
+    }
+
+    #[test]
     fn clone_without_tapped_still_direct_become_copy() {
         // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
         let def = parse_replacement_line(

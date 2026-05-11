@@ -70,7 +70,7 @@ use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::primitives as nom_primitives;
-use super::super::oracle_static::split_keyword_list;
+use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{ContinuousModification, QuantityExpr};
@@ -150,6 +150,7 @@ pub(crate) fn parse_except_clause<'a>(
 ///     → RetainPrintedTriggerFromSource (when ctx provides the index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
 ///   - `it's a(n) {subtype} in addition to its other types`    → AddSubtype
+///   - `it has "<triggered/activated/static ability>"`         → GrantTrigger/GrantAbility/etc.
 ///   - `it has {keyword[, keyword, ...]}`                      → AddKeyword per kw
 pub(crate) fn parse_except_body<'a>(
     input: &'a str,
@@ -176,6 +177,9 @@ pub(crate) fn parse_except_body<'a>(
     }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
         return Some((rest, vec![subtype]));
+    }
+    if let Some((rest, modifications)) = parse_it_has_quoted_ability(input) {
+        return Some((rest, modifications));
     }
     if let Some((rest, keywords)) = parse_it_has_keywords(input) {
         return Some((rest, keywords));
@@ -362,6 +366,49 @@ fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModificatio
         return None;
     }
     Some((remainder, modifications))
+}
+
+/// CR 707.9a: `"except it has \"<ability>\""` makes the quoted ability part
+/// of the copy effect's exception. Reuse the shared quoted-ability parser so
+/// trigger text becomes `GrantTrigger` and activated/static text follows the
+/// same path as other Oracle ability grants.
+fn parse_it_has_quoted_ability(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it has "),
+        tag("he has "),
+        tag("she has "),
+        tag("they have "),
+    ))
+    .parse(input)
+    .ok()?;
+    if !rest.trim_start().starts_with('"') {
+        return None;
+    }
+    let (quoted_text, remainder) = split_single_quoted_ability(rest)?;
+    let modifications = parse_quoted_ability_modifications(quoted_text);
+    if modifications.is_empty() {
+        None
+    } else {
+        Some((remainder, modifications))
+    }
+}
+
+fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim_start();
+    let leading_ws = input.len() - trimmed.len();
+    let mut chars = trimmed.char_indices();
+    let (_, first) = chars.next()?;
+    if first != '"' {
+        return None;
+    }
+    for (idx, ch) in chars {
+        if ch == '"' {
+            let start = leading_ws;
+            let end = leading_ws + idx + 1;
+            return Some((&input[start..end], &input[end..]));
+        }
+    }
+    None
 }
 
 /// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
@@ -743,6 +790,37 @@ mod tests {
                 source_trigger_index: 0,
             }]
         );
+    }
+
+    #[test]
+    fn it_has_quoted_trigger_emits_grant_trigger() {
+        let (rest, mods) = parse_except_clause(
+            ", except it has \"When ~ enters, destroy up to one other target creature with the same name as ~.\"",
+            "Callidus Assassin",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let [ContinuousModification::GrantTrigger { trigger }] = mods.as_slice() else {
+            panic!("expected GrantTrigger, got {mods:?}");
+        };
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
+        let execute = trigger.execute.as_ref().expect("trigger must execute");
+        let crate::types::ability::Effect::Destroy { target, .. } = &*execute.effect else {
+            panic!("expected Destroy effect, got {:?}", execute.effect);
+        };
+        let crate::types::ability::TargetFilter::Typed(filter) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(filter
+            .properties
+            .contains(&crate::types::ability::FilterProp::Another));
+        assert!(filter
+            .properties
+            .contains(&crate::types::ability::FilterProp::SameName));
     }
 
     #[test]

@@ -1535,6 +1535,11 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    if let Some(consumed) = parse_same_name_as_source_suffix(&lower[pos..]) {
+        properties.push(FilterProp::SameName);
+        pos += consumed;
+    }
+
     if controller.is_none()
         && !properties
             .iter()
@@ -2960,6 +2965,24 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
     } else {
         Some((properties, consumed))
     }
+}
+
+fn parse_same_name_as_source_suffix(text: &str) -> Option<usize> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    for suffix in &[
+        "with the same name as ~",
+        "with the same name as this creature",
+        "with the same name as this permanent",
+        "with the same name as this artifact",
+        "with the same name as this enchantment",
+        "with the same name as this land",
+    ] {
+        if tag::<_, _, OracleError<'_>>(*suffix).parse(trimmed).is_ok() {
+            return Some(leading_ws + suffix.len());
+        }
+    }
+    None
 }
 
 fn parse_ownership_or_controller_suffix(
