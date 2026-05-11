@@ -117,6 +117,44 @@ pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
 // Synthesize functions — keyword → ability/trigger expansion
 // ---------------------------------------------------------------------------
 
+pub struct KeywordTriggerInstaller;
+
+impl KeywordTriggerInstaller {
+    pub fn triggers_for(keyword: &Keyword) -> Vec<TriggerDefinition> {
+        match keyword {
+            Keyword::Echo(cost) => vec![build_echo_trigger(cost.clone())],
+            Keyword::Undying => vec![build_dies_return_with_counter_trigger(
+                "P1P1", "+1/+1", "702.93a",
+            )],
+            Keyword::Persist => vec![build_dies_return_with_counter_trigger(
+                "M1M1", "-1/-1", "702.79a",
+            )],
+            Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            _ => Vec::new(),
+        }
+    }
+
+    fn install_matching<F>(face: &mut CardFace, matches_keyword: F)
+    where
+        F: Fn(&Keyword) -> bool,
+    {
+        let desired: Vec<TriggerDefinition> = face
+            .keywords
+            .iter()
+            .filter(|keyword| matches_keyword(keyword))
+            .flat_map(Self::triggers_for)
+            .collect();
+
+        for (index, trigger) in desired.iter().enumerate() {
+            let desired_before = desired[..index].iter().filter(|t| *t == trigger).count();
+            let existing = face.triggers.iter().filter(|t| *t == trigger).count();
+            if existing <= desired_before {
+                face.triggers.push(trigger.clone());
+            }
+        }
+    }
+}
+
 pub fn synthesize_basic_land_mana(face: &mut CardFace) {
     let land_mana: Vec<(&str, ManaColor)> = vec![
         ("Plains", ManaColor::White),
@@ -1186,63 +1224,7 @@ pub fn synthesize_evoke(face: &mut CardFace) {
 /// The runtime marks each new echo permanent `echo_due` when it enters and
 /// clears the marker when the unless-payment is handled.
 pub fn synthesize_echo(face: &mut CardFace) {
-    let echo_costs: Vec<ManaCost> = face
-        .keywords
-        .iter()
-        .filter_map(|kw| {
-            if let Keyword::Echo(cost) = kw {
-                Some(cost.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    if echo_costs.is_empty() {
-        return;
-    }
-
-    let already_has_trigger = face.triggers.iter().any(|t| {
-        matches!(t.mode, TriggerMode::PayEcho)
-            && t.phase == Some(Phase::Upkeep)
-            && matches!(t.valid_target, Some(TargetFilter::Controller))
-            && matches!(t.condition, Some(TriggerCondition::EchoDue))
-            && t.unless_pay.is_some()
-            && matches!(
-                t.execute.as_deref().map(|a| &*a.effect),
-                Some(Effect::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    ..
-                })
-            )
-    });
-    if already_has_trigger {
-        return;
-    }
-
-    for cost in echo_costs {
-        let sac = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
-                min_count: 0,
-            },
-        );
-        let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
-            .phase(Phase::Upkeep)
-            .valid_target(TargetFilter::Controller)
-            .condition(TriggerCondition::EchoDue)
-            .execute(sac)
-            .description(
-                "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
-                    .to_string(),
-            );
-        trigger.unless_pay = Some(UnlessPayModifier {
-            cost: AbilityCost::Mana { cost },
-            payer: TargetFilter::Controller,
-        });
-        face.triggers.push(trigger);
-    }
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Echo(_)));
 }
 
 /// CR 702.175a: Offspring represents two abilities:
@@ -1478,7 +1460,7 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
 /// enum carries the polarity choice at the type level; no runtime branching
 /// is needed.
 pub fn synthesize_undying(face: &mut CardFace) {
-    synthesize_dies_return_with_counter(face, &Keyword::Undying, "P1P1", "+1/+1", "702.93a");
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Undying));
 }
 
 /// CR 702.79a: Persist — "When this permanent is put into a graveyard from the
@@ -1490,7 +1472,7 @@ pub fn synthesize_undying(face: &mut CardFace) {
 /// CR 702.79, every `Keyword::Persist` instance functions independently, so
 /// one synthesized trigger is emitted per keyword on the face.
 pub fn synthesize_persist(face: &mut CardFace) {
-    synthesize_dies_return_with_counter(face, &Keyword::Persist, "M1M1", "-1/-1", "702.79a");
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Persist));
 }
 
 /// CR 702.86a: Annihilator N — "Whenever this creature attacks, defending
@@ -1522,64 +1504,7 @@ pub fn synthesize_persist(face: &mut CardFace) {
 /// much as possible" mandatory-all fast-path — no separate "as many as
 /// possible" plumbing is needed here.
 pub fn synthesize_annihilator(face: &mut CardFace) {
-    let annihilator_values: Vec<u32> = face
-        .keywords
-        .iter()
-        .filter_map(|kw| match kw {
-            Keyword::Annihilator(n) => Some(*n),
-            _ => None,
-        })
-        .collect();
-    if annihilator_values.is_empty() {
-        return;
-    }
-
-    // Count keyword instances so re-running the synthesizer on an already
-    // built face is a no-op while still respecting CR 702.86b: distinct
-    // instances each emit their own trigger.
-    let existing_matching: usize = face
-        .triggers
-        .iter()
-        .filter(|t| is_annihilator_attack_trigger(t))
-        .count();
-    if existing_matching >= annihilator_values.len() {
-        return;
-    }
-
-    let remaining = annihilator_values.len() - existing_matching;
-    for &n in annihilator_values
-        .iter()
-        .skip(existing_matching)
-        .take(remaining)
-    {
-        // CR 701.21a: sacrifice moves the permanent to its owner's graveyard.
-        // Sacrifice scope derives from the target filter's `ControllerRef`;
-        // `DefendingPlayer` routes to
-        // `defending_player_for_attacker(state, source_id)` at resolution.
-        let sacrifice_effect = Effect::Sacrifice {
-            target: TargetFilter::Typed(
-                TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
-            ),
-            count: QuantityExpr::Fixed { value: n as i32 },
-            min_count: 0,
-        };
-
-        let execute =
-            AbilityDefinition::new(AbilityKind::Spell, sacrifice_effect).description(format!(
-                "Defending player sacrifices {n} permanent{}",
-                if n == 1 { "" } else { "s" }
-            ));
-
-        let trigger = TriggerDefinition::new(TriggerMode::Attacks)
-            .valid_card(TargetFilter::SelfRef)
-            .execute(execute)
-            .description(format!(
-                "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
-                if n == 1 { "" } else { "s" }
-            ));
-
-        face.triggers.push(trigger);
-    }
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Annihilator(_)));
 }
 
 /// Idempotency-shape predicate for `synthesize_annihilator`. True iff `trigger`
@@ -1590,6 +1515,7 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
 /// The check is narrow on purpose: an unrelated `Attacks` trigger on the same
 /// face (e.g., "Whenever ~ attacks, you draw a card") must NOT be counted as
 /// an existing Annihilator emission.
+#[cfg(test)]
 fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::Attacks)
         || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
@@ -1609,96 +1535,114 @@ fn is_annihilator_attack_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
-/// Shared synthesizer for the Undying/Persist class (CR 702.93a / CR 702.79a):
+fn build_echo_trigger(cost: ManaCost) -> TriggerDefinition {
+    let sac = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
+        .phase(Phase::Upkeep)
+        .valid_target(TargetFilter::Controller)
+        .condition(TriggerCondition::EchoDue)
+        .execute(sac)
+        .description(
+            "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
+                .to_string(),
+        );
+    trigger.unless_pay = Some(UnlessPayModifier {
+        cost: AbilityCost::Mana { cost },
+        payer: TargetFilter::Controller,
+    });
+    trigger
+}
+
+fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
+    // CR 701.21a: sacrifice moves the permanent to its owner's graveyard.
+    // Sacrifice scope derives from the target filter's `ControllerRef`;
+    // `DefendingPlayer` routes to `defending_player_for_attacker(state,
+    // source_id)` at resolution.
+    let sacrifice_effect = Effect::Sacrifice {
+        target: TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
+        ),
+        count: QuantityExpr::Fixed { value: n as i32 },
+        min_count: 0,
+    };
+
+    let execute =
+        AbilityDefinition::new(AbilityKind::Spell, sacrifice_effect).description(format!(
+            "Defending player sacrifices {n} permanent{}",
+            if n == 1 { "" } else { "s" }
+        ));
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.86a: Annihilator {n} — whenever ~ attacks, defending player sacrifices {n} permanent{}.",
+            if n == 1 { "" } else { "s" }
+        ))
+}
+
+/// Shared trigger builder for the Undying/Persist class (CR 702.93a / CR 702.79a):
 /// "When this permanent dies, if it had no `<polarity>` counters on it, return
 /// it to the battlefield under its owner's control with a `<polarity>` counter
 /// on it."
 ///
-/// Build-for-the-class: parameterized over the gating keyword variant and the
-/// counter polarity string (`"P1P1"` or `"M1M1"`). Any future "dies → return
-/// with single typed counter, gated on the same counter type's prior absence"
-/// keyword can reuse this directly.
-fn synthesize_dies_return_with_counter(
-    face: &mut CardFace,
-    keyword: &Keyword,
+/// Build-for-the-class: parameterized over the counter polarity string
+/// (`"P1P1"` or `"M1M1"`). Any future "dies → return with single typed
+/// counter, gated on the same counter type's prior absence" keyword can reuse
+/// this directly.
+fn build_dies_return_with_counter_trigger(
     counter_type: &str,
     counter_label: &str,
     cr_ref: &str,
-) {
-    // Count keyword instances on the face. Per CR 113.2c ("If an object has
-    // multiple instances of the same ability, each instance functions
-    // independently") and the absence of an Undying/Persist redundancy
-    // clause (compare CR 702.2f / CR 702.9c), each keyword instance emits a
-    // distinct trigger.
-    let instances = face.keywords.iter().filter(|kw| *kw == keyword).count();
-    if instances == 0 {
-        return;
-    }
+) -> TriggerDefinition {
+    // CR 122.1 + CR 614.1c: Single +1/+1 (or -1/-1) counter applied as
+    // the object enters the battlefield, via the existing
+    // `Effect::ChangeZone.enter_with_counters` plumbing.
+    let return_effect = Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Battlefield,
+        target: TargetFilter::SelfRef,
+        owner_library: false,
+        enter_transformed: false,
+        // CR 702.93a / CR 702.79a: "under its owner's control" — default
+        // (false) sends the object to its owner's control. `true` would
+        // override to the ability controller's control.
+        under_your_control: false,
+        enter_tapped: false,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: vec![(counter_type.to_string(), QuantityExpr::Fixed { value: 1 })],
+    };
 
-    // Idempotency: structural-shape match on the synthesized trigger. Match the
-    // dies-trigger shape (mode + origin + destination + valid_card) AND the
-    // execute body's counter type so an Undying synthesis pass can't be
-    // shadowed by a Persist trigger (or vice versa) on a hypothetical
-    // dual-keyword face. The condition shape (Not(HadCounters)) is
-    // counter-type specific via the execute body's `enter_with_counters`.
-    let existing_matching: usize = face
-        .triggers
-        .iter()
-        .filter(|t| is_dies_return_with_counter_trigger(t, counter_type))
-        .count();
-    if existing_matching >= instances {
-        return;
-    }
+    let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
+        "Return it to the battlefield with a {counter_label} counter on it"
+    ));
 
-    let remaining = instances - existing_matching;
-    for _ in 0..remaining {
-        // CR 122.1 + CR 614.1c: Single +1/+1 (or -1/-1) counter applied as
-        // the object enters the battlefield, via the existing
-        // `Effect::ChangeZone.enter_with_counters` plumbing. One zone-change
-        // effect carries both the return and the counter placement —
-        // composing from primitives instead of chaining a separate
-        // `Effect::PutCounter` sub-ability.
-        let return_effect = Effect::ChangeZone {
-            origin: Some(Zone::Graveyard),
-            destination: Zone::Battlefield,
-            target: TargetFilter::SelfRef,
-            owner_library: false,
-            enter_transformed: false,
-            // CR 702.93a / CR 702.79a: "under its owner's control" — default
-            // (false) sends the object to its owner's control. `true` would
-            // override to the ability controller's control.
-            under_your_control: false,
-            enter_tapped: false,
-            enters_attacking: false,
-            up_to: false,
-            enter_with_counters: vec![(counter_type.to_string(), QuantityExpr::Fixed { value: 1 })],
-        };
+    // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
+    // negate `HadCounters` to express the absence of the specific counter
+    // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
+    let condition = TriggerCondition::Not {
+        condition: Box::new(TriggerCondition::HadCounters {
+            counter_type: Some(counter_type.to_string()),
+        }),
+    };
 
-        let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(
-            format!("Return it to the battlefield with a {counter_label} counter on it"),
-        );
-
-        // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
-        // negate `HadCounters` to express the absence of the specific counter
-        // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
-        let condition = TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::HadCounters {
-                counter_type: Some(counter_type.to_string()),
-            }),
-        };
-
-        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
-            .origin(Zone::Battlefield)
-            .destination(Zone::Graveyard)
-            .valid_card(TargetFilter::SelfRef)
-            .condition(condition)
-            .execute(execute)
-            .description(format!(
-                "CR {cr_ref}: When ~ dies, if it had no {counter_label} counters on it, return it to the battlefield under its owner's control with a {counter_label} counter on it."
-            ));
-
-        face.triggers.push(trigger);
-    }
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(condition)
+        .execute(execute)
+        .description(format!(
+            "CR {cr_ref}: When ~ dies, if it had no {counter_label} counters on it, return it to the battlefield under its owner's control with a {counter_label} counter on it."
+        ))
 }
 
 /// Idempotency-shape predicate for `synthesize_dies_return_with_counter`.
@@ -1708,6 +1652,7 @@ fn synthesize_dies_return_with_counter(
 /// the counter type on the execute body's `enter_with_counters`) — so an
 /// unrelated dies-trigger on the same face (e.g., "When ~ dies, draw a card")
 /// is correctly ignored.
+#[cfg(test)]
 fn is_dies_return_with_counter_trigger(t: &TriggerDefinition, counter_type: &str) -> bool {
     if !matches!(t.mode, TriggerMode::ChangesZone)
         || t.origin != Some(Zone::Battlefield)

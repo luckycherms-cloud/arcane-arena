@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::arithmetic::saturating_pt_add;
 use crate::game::devotion::count_devotion;
 use crate::game::filter::{matches_target_filter, FilterContext};
@@ -1560,7 +1561,12 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     other => other.clone(),
                 };
                 if !obj.keywords.contains(&resolved_keyword) {
-                    obj.keywords.push(resolved_keyword);
+                    obj.keywords.push(resolved_keyword.clone());
+                }
+                for trigger in KeywordTriggerInstaller::triggers_for(&resolved_keyword) {
+                    if !obj.trigger_definitions.iter_all().any(|t| t == &trigger) {
+                        obj.trigger_definitions.push(trigger);
+                    }
                 }
             }
             // Asymmetric on purpose: `RemoveKeyword` strips every keyword that
@@ -1951,7 +1957,7 @@ mod tests {
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
         ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, ObjectScope,
         PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter, ZoneRef,
+        TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -5854,6 +5860,94 @@ mod tests {
         );
         assert!(obj.keywords.contains(&ward_one));
         assert!(obj.keywords.contains(&ward_two));
+    }
+
+    #[test]
+    fn add_keyword_undying_installs_and_removes_synthesized_trigger() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Mikaeus Stand-In", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: bear })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Undying,
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Undying));
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = obj.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::Not { .. })
+        ));
+
+        state.battlefield.retain(|&id| id != source);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&bear).unwrap();
+        assert!(!obj.keywords.contains(&Keyword::Undying));
+        assert!(obj.trigger_definitions.is_empty());
+    }
+
+    #[test]
+    fn add_keyword_annihilator_installs_parameterized_attack_trigger() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, "Battle-Mace Bearer", 2, 2, PlayerId(0));
+        let source = make_creature(&mut state, "Nazgul Battle-Mace Stand-In", 1, 1, PlayerId(0));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::SpecificObject { id: attacker })
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Annihilator(1),
+            }]);
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        let obj = state.objects.get(&attacker).unwrap();
+        assert!(obj.keywords.contains(&Keyword::Annihilator(1)));
+        assert_eq!(obj.trigger_definitions.len(), 1);
+        let trigger = obj.trigger_definitions.first().unwrap();
+        assert!(matches!(trigger.mode, TriggerMode::Attacks));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::Sacrifice {
+            target,
+            count,
+            min_count,
+        } = &*execute.effect
+        else {
+            panic!("annihilator execute must sacrifice permanents");
+        };
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(*min_count, 0);
+        let TargetFilter::Typed(filter) = target else {
+            panic!("annihilator target must be a typed permanent filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::DefendingPlayer));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Permanent)));
     }
 
     /// CR 702.16m: Multiple instances of protection from the same quality on
