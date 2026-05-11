@@ -2613,6 +2613,40 @@ pub enum ObjectProperty {
     ManaValue,
 }
 
+/// CR 701.13 + CR 701.17a: Termination predicate for an iterative exile-from-top
+/// loop. The loop exiles one card at a time off the top of a library and checks
+/// the predicate after each exile; the loop ends as soon as the predicate is
+/// satisfied (or the library is empty).
+///
+/// This parameterizes `Effect::ExileFromTopUntil` so that the same iteration
+/// engine handles two distinct stop-condition families:
+///
+/// * `NextMatches(filter)` — stop once the most-recently-exiled card matches a
+///   filter. Covers Etali / Cascade / Discover-shape patterns where a single
+///   "hit" card is selected (see CR 702.85a, CR 701.57a).
+/// * `CumulativeThreshold { .. }` — stop once the running aggregate over every
+///   card exiled this resolution satisfies the comparator vs the threshold.
+///   Covers Tasha's Hideous Laughter, Dream Harvest, Improvisation Capstone
+///   ("…until that player has exiled cards with total mana value N or
+///   greater") — CR 202.3 supplies the per-card mana value, CR 107.3e the
+///   summation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum UntilCondition {
+    /// CR 702.85a / CR 701.57a: Loop terminates when the just-exiled card
+    /// satisfies the filter. The matching card is exposed to the sub_ability
+    /// chain as an injected target.
+    NextMatches { filter: TargetFilter },
+    /// CR 202.3 + CR 107.3e: Loop terminates when the cumulative `property`
+    /// summed over every card exiled this resolution satisfies
+    /// `comparator(sum, threshold)`.
+    CumulativeThreshold {
+        property: ObjectProperty,
+        comparator: Comparator,
+        threshold: QuantityExpr,
+    },
+}
+
 /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
 /// as a cost for the resolving spell or ability. Effects can later refer to
 /// that object even after the cost moved it to a public zone.
@@ -4966,11 +5000,17 @@ pub enum Effect {
     LoseAllPlayerCounters {
         target: TargetFilter,
     },
-    /// CR 702.84a: Exile cards from the top of your library one at a time until you
-    /// exile a card matching the filter. The hit card is passed to the sub_ability chain
-    /// as an injected target.
+    /// CR 701.13 + CR 701.17a: Exile cards from the top of a player's library
+    /// one at a time until the typed `until` predicate is satisfied. The
+    /// `until` axis is parameterized by [`UntilCondition`] — either
+    /// `NextMatches(filter)` (Etali/Cascade/Discover-shape: stop on first hit
+    /// and pass the hit card to the sub_ability chain) or
+    /// `CumulativeThreshold { property, comparator, threshold }` (Tasha's
+    /// Hideous Laughter / Dream Harvest / Improvisation Capstone: stop once
+    /// the running sum of the property over every card exiled this resolution
+    /// satisfies the comparator vs the threshold; CR 202.3 + CR 107.3e).
     ExileFromTopUntil {
-        filter: TargetFilter,
+        until: UntilCondition,
     },
     /// CR 701.20a: Reveal cards from the top of a player's library one at a time
     /// until that player reveals a card matching the filter. The matching card

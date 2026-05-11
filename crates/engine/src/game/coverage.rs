@@ -1782,9 +1782,37 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::LoseAllPlayerCounters { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ExileFromTopUntil { filter } => {
-            d.push(("until".into(), fmt_target(filter)));
-        }
+        Effect::ExileFromTopUntil { until } => match until {
+            crate::types::ability::UntilCondition::NextMatches { filter } => {
+                d.push(("until".into(), fmt_target(filter)));
+            }
+            crate::types::ability::UntilCondition::CumulativeThreshold {
+                property,
+                comparator,
+                threshold,
+            } => {
+                d.push((
+                    "until_cumulative".into(),
+                    format!(
+                        "{} {} {}",
+                        match property {
+                            ObjectProperty::Power => "power",
+                            ObjectProperty::Toughness => "toughness",
+                            ObjectProperty::ManaValue => "mana value",
+                        },
+                        match comparator {
+                            crate::types::ability::Comparator::GE => "≥",
+                            crate::types::ability::Comparator::GT => ">",
+                            crate::types::ability::Comparator::LE => "≤",
+                            crate::types::ability::Comparator::LT => "<",
+                            crate::types::ability::Comparator::EQ => "=",
+                            crate::types::ability::Comparator::NE => "≠",
+                        },
+                        fmt_quantity(threshold),
+                    ),
+                ));
+            }
+        },
         Effect::RevealUntil {
             player,
             filter,

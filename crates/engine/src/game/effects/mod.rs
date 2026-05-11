@@ -1937,8 +1937,12 @@ pub fn resolve_ability_chain(
         }
     }
 
-    // ExileFromTopUntil handles its own sub_ability chain internally (injecting the
-    // hit card as a target), so skip the outer chain to avoid double-execution.
+    // ExileFromTopUntil handles its own sub_ability chain internally for both
+    // `UntilCondition` arms — `NextMatches` injects the hit card as the
+    // sub-ability's target; `CumulativeThreshold` runs the sub-chain with the
+    // original target list intact so it can address the per-resolution exile
+    // links via `TargetFilter::ExiledBySource`. Either way, skip the outer
+    // chain to avoid double-execution.
     if matches!(ability.effect, Effect::ExileFromTopUntil { .. }) {
         return Ok(());
     }

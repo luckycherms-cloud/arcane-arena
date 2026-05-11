@@ -43,14 +43,15 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission,
-    ChoiceType, ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    ChoiceType, ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard,
+    ContinuousModification, ControllerRef, DamageModification, DamageSource,
+    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -3339,29 +3340,37 @@ fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<Targe
 }
 
 fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
-    // CR 701.57a + CR 702.85a + CR 400.7: Parse `exile[s] cards from the top of
-    // <possessive> library until <pronoun> exile[s] a/an {filter} card`.
+    // CR 701.13a + CR 701.57a + CR 702.85a + CR 202.3 + CR 107.3e: Parse the
+    // unified `exile cards from the top of <possessive> library until <until>`
+    // pattern. The `until` clause is dispatched into a typed
+    // [`UntilCondition`] so the same parser arm handles both stop-condition
+    // families:
     //
-    // 701.57a / 702.85a (Discover / Cascade): canonical "exile from top until
-    // a nonland card" pattern that the typed `Effect::ExileFromTopUntil`
-    // generalizes — same shape with a parameterized hit filter (Etali, Primal
-    // Conqueror's "until they exile a nonland card").
-    // 400.7: each exiled card is a new object; tracked by ExileLink in the
-    // resolver so downstream `TargetFilter::ExiledBySource` lookups (Etali's
-    // "from among the nonland cards exiled this way" sub-clause) resolve
-    // correctly.
+    // * `NextMatches` (CR 701.57a / CR 702.85a) — Discover / Cascade /
+    //   Etali-shape: "until <pronoun> exile[s] a/an {filter} card". Stops on
+    //   the first hit; the hit card is exposed to the sub_ability chain.
     //
-    // Both second-person ("exile … your library … until you exile") and
-    // third-person ("exile … their library … until they exile") possessive
-    // variants are accepted. The "each player " subject is stripped upstream
-    // by `strip_each_player_subject`, which deconjugates "exiles" → "exile";
-    // by the time we get here Etali's trigger body reads
-    //   "exile cards from the top of their library until they exile a nonland card"
-    // — same verb form as the second-person path with a different determiner.
+    // * `CumulativeThreshold` (CR 202.3 + CR 107.3e) — Tasha's Hideous
+    //   Laughter / Dream Harvest / Improvisation Capstone: "until <subject>
+    //   <verb> exiled cards with total mana value N or greater". Stops once
+    //   the running sum reaches the threshold.
+    //
+    // CR 400.7: each exiled card is a new object; tracked by `ExileLink` in
+    // the resolver so downstream `TargetFilter::ExiledBySource` lookups
+    // resolve correctly for both stop-condition kinds.
+    //
+    // Subject normalization — both second-person ("exile … your library
+    // until you exile …") and third-person ("exile … their library until
+    // they exile …") possessives are accepted. The "each player " /
+    // "each opponent " subject is stripped upstream by
+    // `strip_each_player_subject`, which deconjugates "exiles" → "exile";
+    // by the time this combinator runs Tasha's body reads
+    //   "exile cards from the top of their library until that player has
+    //    exiled cards with total mana value 20 or greater"
+    // — same prefix as Etali, different until-clause shape.
     //
     // Mirrors the analogous sub-combinator pattern in
-    // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433) which handles
-    // the same possessive variation for `RevealUntil`.
+    // `parse_reveal_until_prefix` (oracle_effect/mod.rs:2433).
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = alt((tag("exile "), tag("exiles "))).parse(i)?;
         let (i, _) = tag("cards from the top of ").parse(i)?;
@@ -3373,7 +3382,48 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
             tag("its "),
         ))
         .parse(i)?;
-        let (i, _) = tag("library until ").parse(i)?;
+        value::<_, _, OracleError<'_>, _>((), tag("library until ")).parse(i)
+    })?;
+    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    let until = parse_until_condition(rest_lower)?;
+    Some(parsed_clause(Effect::ExileFromTopUntil { until }))
+}
+
+/// CR 701.13a + CR 701.57a + CR 702.85a + CR 202.3 + CR 107.3e: Dispatch the
+/// until-clause of an `exile cards from the top of <library> until …` body
+/// into a typed [`UntilCondition`]. The two recognised shapes are:
+///
+/// * `NextMatches` — `<pronoun> exile[s] a/an {filter} card`
+///   (e.g. "you exile a nonland card", "they exile a creature card").
+///
+/// * `CumulativeThreshold` — `<subject> <verb> exiled cards with total mana
+///   value N <comparator>` (e.g. "you exile cards with total mana value 4 or
+///   greater", "that player has exiled cards with total mana value 20 or
+///   greater", "they have exiled cards with total mana value 5 or greater
+///   this way"). The trailing `this way` qualifier is informational — it
+///   refers to the per-resolution exile-link channel which the runtime
+///   already tracks via `ExileLinkKind::TrackedBySource`.
+///
+/// Returns `None` if the clause matches neither shape so the caller can
+/// fall through to the generic dispatcher.
+fn parse_until_condition(input: &str) -> Option<UntilCondition> {
+    // First, try the cumulative form: it carries a richer leading subject
+    // ("that player has exiled" / "they have exiled" / "you exile") that
+    // precedes the "exiled cards with total mana value" tail. Try this branch
+    // first because the NextMatches branch's leading "you exile " /
+    // "they exile " prefix is a left-anchored substring of one of the
+    // cumulative-clause subjects.
+    if let Some(cond) = try_parse_cumulative_until(input) {
+        return Some(cond);
+    }
+    try_parse_next_matches_until(input)
+}
+
+/// CR 701.57a / CR 702.85a: Parse `<pronoun> exile[s] a/an {filter} card.`
+/// Returns the typed `UntilCondition::NextMatches { filter }`.
+fn try_parse_next_matches_until(input: &str) -> Option<UntilCondition> {
+    let (_, rest) = nom_on_lower(input, input, |i| {
         let (i, _) = alt((
             tag("you exile "),
             tag("they exile "),
@@ -3384,10 +3434,11 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
         .parse(i)?;
         nom_primitives::parse_article(i)
     })?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
-    // Extract the filter from "nonland card", "creature card", etc.
-    let filter_text = rest_lower.trim_end_matches('.').trim_end_matches(" card");
+    // Extract the filter from "nonland card", "creature card", etc. The
+    // downstream `parse_target` call does the actual filter parsing with
+    // combinators; this is just punctuation/suffix cleanup on the chunk.
+    let filter_text = rest.trim_end_matches('.').trim_end_matches(" card"); // allow-noncombinator: structural punctuation cleanup on isolated filter chunk
 
     let filter = if filter_text == "nonland" {
         TargetFilter::Typed(
@@ -3399,7 +3450,95 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
         parsed
     };
 
-    Some(parsed_clause(Effect::ExileFromTopUntil { filter }))
+    Some(UntilCondition::NextMatches { filter })
+}
+
+/// CR 202.3 + CR 107.3e: Parse the cumulative-threshold until-clause shape.
+/// Recognises every documented subject/verb form for this family:
+///
+///   <subject> [has|have] exiled cards with total mana value N <comparator>[ this way]
+///
+/// where `<subject>` is `that player`, `they`, `you`, `it`, `he`, `she`, or
+/// the bare deconjugated `<pronoun> exile` (the "each opponent" → "exile"
+/// path that `strip_each_player_subject` produces, e.g. Improvisation
+/// Capstone's "you exile cards with total mana value 4 or greater").
+fn try_parse_cumulative_until(input: &str) -> Option<UntilCondition> {
+    let (_, rest) = nom_on_lower(input, input, |i| {
+        // Subject + verb. Two grammatical shapes appear in printed cards:
+        //
+        //   * Perfect aspect: "that player has exiled" / "they have exiled" /
+        //     "you have exiled" — the "this way" qualifier is typically present.
+        //   * Imperative deconjugation: "you exile" / "they exile" — produced
+        //     by the upstream "each opponent" stripper for cards whose printed
+        //     text was "Each opponent exiles cards … until they exile cards …".
+        //
+        // Compose subject + verb as a single combinator alternation.
+        let (i, _) = alt((
+            tag("that player has exiled "),
+            tag("they have exiled "),
+            tag("you have exiled "),
+            tag("it has exiled "),
+            tag("he has exiled "),
+            tag("she has exiled "),
+            tag("they exile "),
+            tag("you exile "),
+            tag("it exiles "),
+            tag("he exiles "),
+            tag("she exiles "),
+        ))
+        .parse(i)?;
+        value::<_, _, OracleError<'_>, _>((), tag("cards with total ")).parse(i)
+    })?;
+
+    // Property axis: "mana value", "power", or "toughness". Power/toughness
+    // are speculative for printed cards but cost zero to wire — the runtime
+    // resolver already handles all three via `ObjectProperty`.
+    let (property, after_prop) = parse_property_axis(rest)?;
+
+    // Threshold: "N or greater" / "N or more" / "N or less" / "N or fewer".
+    // Fixed integer threshold; X-thresholds for this clause shape don't appear
+    // in printed cards but the typed enum already supports `QuantityExpr::X`
+    // upstream if needed.
+    let (after_n, n) = nom_primitives::parse_number(after_prop).ok()?;
+    let comparator = parse_threshold_comparator(after_n.trim_start())?;
+
+    // Trailing qualifiers ("this way", ".") are informational; the
+    // per-resolution exile-link tracking is already enforced at runtime.
+    Some(UntilCondition::CumulativeThreshold {
+        property,
+        comparator,
+        threshold: QuantityExpr::Fixed {
+            value: i32::try_from(n).unwrap_or(i32::MAX),
+        },
+    })
+}
+
+/// CR 202.3 / CR 208 / CR 209: Recognise the property axis of a cumulative
+/// threshold clause. Returns the property and the remaining input.
+fn parse_property_axis(input: &str) -> Option<(ObjectProperty, &str)> {
+    nom_on_lower(input, input, |i| {
+        alt((
+            value(ObjectProperty::ManaValue, tag("mana value ")),
+            value(ObjectProperty::Power, tag("power ")),
+            value(ObjectProperty::Toughness, tag("toughness ")),
+        ))
+        .parse(i)
+    })
+}
+
+/// Recognise the comparator suffix of a cumulative threshold clause:
+/// "or greater" / "or more" → `GE`, "or less" / "or fewer" → `LE`.
+fn parse_threshold_comparator(input: &str) -> Option<Comparator> {
+    nom_on_lower(input, input, |i| {
+        alt((
+            value(Comparator::GE, tag("or greater")),
+            value(Comparator::GE, tag("or more")),
+            value(Comparator::LE, tag("or less")),
+            value(Comparator::LE, tag("or fewer")),
+        ))
+        .parse(i)
+    })
+    .map(|(c, _)| c)
 }
 
 /// CR 701.20a: Parse the prefix `"reveal[s] cards from the top of <possessive>
@@ -26246,13 +26385,17 @@ mod tests {
     /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
     /// second-person possessive form ("your library" / "you exile").
     /// Regression-protection for the pre-existing path Etali's parser
-    /// extension was layered onto.
+    /// extension was layered onto. Now exercises the
+    /// `UntilCondition::NextMatches` arm of the parameterised stop condition.
     #[test]
     fn exile_from_top_until_second_person_nonland_filter() {
         let e =
             parse_effect("exile cards from the top of your library until you exile a nonland card");
-        let Effect::ExileFromTopUntil { filter } = e else {
+        let Effect::ExileFromTopUntil { until } = e else {
             panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        let UntilCondition::NextMatches { filter } = until else {
+            panic!("expected NextMatches arm, got {:?}", until);
         };
         // Filter is `Typed { type_filters: [Non(Land)] }`.
         let TargetFilter::Typed(typed) = filter else {
@@ -26275,8 +26418,11 @@ mod tests {
         let e = parse_effect(
             "exile cards from the top of their library until they exile a nonland card",
         );
-        let Effect::ExileFromTopUntil { filter } = e else {
+        let Effect::ExileFromTopUntil { until } = e else {
             panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        let UntilCondition::NextMatches { filter } = until else {
+            panic!("expected NextMatches arm, got {:?}", until);
         };
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter");
@@ -26293,7 +26439,7 @@ mod tests {
     /// "exiles" → "exile", then the third-person possessive arm of
     /// `try_parse_exile_from_top_until` finalizes the lowering. Outer ability
     /// must carry `player_scope: All` so the resolver iterates per player;
-    /// outer effect must be `ExileFromTopUntil { filter: Non(Land) }`. (The
+    /// outer effect must be `ExileFromTopUntil { until: NextMatches { filter: Non(Land) } }`. (The
     /// follow-up `cast any number of spells from among …` sub-sentence is a
     /// separate parser path — not asserted here; see the runtime tests in
     /// `game::effects::exile_from_top_until::tests` for per-resolution exile
@@ -26310,8 +26456,11 @@ mod tests {
             Some(PlayerFilter::All),
             "player_scope must propagate from \"each player\" subject"
         );
-        let Effect::ExileFromTopUntil { ref filter } = *def.effect else {
+        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
             panic!("expected outer ExileFromTopUntil, got {:?}", def.effect);
+        };
+        let UntilCondition::NextMatches { filter } = until else {
+            panic!("expected NextMatches arm, got {:?}", until);
         };
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {:?}", filter);
@@ -26322,6 +26471,138 @@ mod tests {
             ),
             "filter must be Non(Land)"
         );
+    }
+
+    /// CR 202.3 + CR 107.3e: Tasha's Hideous Laughter — "Each opponent exiles
+    /// cards from the top of their library until that player has exiled cards
+    /// with total mana value 20 or greater." After `strip_each_player_subject`
+    /// strips "each opponent " and binds `player_scope: Opponent`, the body
+    /// reads "exile cards from the top of their library until that player has
+    /// exiled cards with total mana value 20 or greater" — which the parser
+    /// must lower to `ExileFromTopUntil { until: CumulativeThreshold { ManaValue, GE, 20 } }`,
+    /// not to the misparsed flat `ChangeZone` that originally prompted the
+    /// user for a permanent target (issue #316).
+    #[test]
+    fn tashas_hideous_laughter_lowers_to_cumulative_threshold() {
+        let def = parse_effect_chain(
+            "Each opponent exiles cards from the top of their library until that player has exiled cards with total mana value 20 or greater.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "player_scope must be Opponent (from \"each opponent\" subject)"
+        );
+
+        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
+            panic!(
+                "expected ExileFromTopUntil, got {:?} — issue #316 regression",
+                def.effect
+            );
+        };
+        let UntilCondition::CumulativeThreshold {
+            property,
+            comparator,
+            threshold,
+        } = until
+        else {
+            panic!("expected CumulativeThreshold arm, got {:?}", until);
+        };
+        assert_eq!(*property, ObjectProperty::ManaValue);
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*threshold, QuantityExpr::Fixed { value: 20 });
+    }
+
+    /// CR 202.3 + CR 107.3e: Improvisation Capstone — second-person cumulative
+    /// shape: "Exile cards from the top of your library until you exile cards
+    /// with total mana value 4 or greater." The "you exile cards" subject is
+    /// the imperative-deconjugated form (no auxiliary "have"); covers the
+    /// distinct grammatical branch from Tasha's "that player has exiled".
+    #[test]
+    fn improvisation_capstone_second_person_cumulative_threshold() {
+        let e = parse_effect(
+            "exile cards from the top of your library until you exile cards with total mana value 4 or greater",
+        );
+        let Effect::ExileFromTopUntil { until } = e else {
+            panic!("expected ExileFromTopUntil, got {:?}", e);
+        };
+        let UntilCondition::CumulativeThreshold {
+            property,
+            comparator,
+            threshold,
+        } = until
+        else {
+            panic!("expected CumulativeThreshold arm, got {:?}", until);
+        };
+        assert_eq!(property, ObjectProperty::ManaValue);
+        assert_eq!(comparator, Comparator::GE);
+        assert_eq!(threshold, QuantityExpr::Fixed { value: 4 });
+    }
+
+    /// CR 202.3 + CR 107.3e: Dream Harvest — "Each opponent exiles cards from
+    /// the top of their library until they have exiled cards with total mana
+    /// value 5 or greater this way." Verifies the "they have exiled … this
+    /// way" subject + trailing-qualifier shape that differs from Tasha's
+    /// "that player has exiled".
+    #[test]
+    fn dream_harvest_third_person_perfect_aspect_with_this_way_qualifier() {
+        let def = parse_effect_chain(
+            "Each opponent exiles cards from the top of their library until they have exiled cards with total mana value 5 or greater this way.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+
+        let Effect::ExileFromTopUntil { ref until } = *def.effect else {
+            panic!("expected ExileFromTopUntil, got {:?}", def.effect);
+        };
+        let UntilCondition::CumulativeThreshold {
+            property,
+            comparator,
+            threshold,
+        } = until
+        else {
+            panic!("expected CumulativeThreshold arm, got {:?}", until);
+        };
+        assert_eq!(*property, ObjectProperty::ManaValue);
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*threshold, QuantityExpr::Fixed { value: 5 });
+    }
+
+    /// Parameterized building-block test — every comparator suffix the parser
+    /// recognises ("or greater", "or more", "or less", "or fewer") lowers
+    /// correctly. Pins the comparator-axis surface so future axis additions
+    /// do not silently regress these.
+    #[test]
+    fn cumulative_threshold_comparator_surface_is_complete() {
+        for (suffix, expected) in [
+            ("or greater", Comparator::GE),
+            ("or more", Comparator::GE),
+            ("or less", Comparator::LE),
+            ("or fewer", Comparator::LE),
+        ] {
+            let text = format!(
+                "exile cards from the top of your library until you exile cards with total mana value 3 {suffix}",
+            );
+            let e = parse_effect(&text);
+            let Effect::ExileFromTopUntil {
+                until:
+                    UntilCondition::CumulativeThreshold {
+                        comparator,
+                        threshold,
+                        ..
+                    },
+            } = e
+            else {
+                panic!("expected cumulative threshold for suffix \"{suffix}\", got {e:?}");
+            };
+            assert_eq!(
+                comparator, expected,
+                "suffix \"{suffix}\" should map to {expected:?}"
+            );
+            assert_eq!(threshold, QuantityExpr::Fixed { value: 3 });
+        }
     }
 
     #[test]
