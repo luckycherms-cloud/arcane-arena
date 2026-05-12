@@ -759,7 +759,8 @@ pub(super) fn handle_resolution_choice(
 
             set_priority(state, player);
             if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                let mut continuation_targets: Vec<_> =
+                    chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 701.23a + CR 701.24a: When the searcher is not the caster
                 // (e.g., "its controller may search their library, ..., then
                 // shuffle" for Assassin's Trophy), propagate the searcher's
@@ -767,8 +768,10 @@ pub(super) fn handle_resolution_choice(
                 // untargeted-Shuffle / Library-owner-sensitive effects pick up
                 // the correct player via `ability.target_player()`.
                 if player != cont.chain.controller {
-                    cont.chain.targets.push(TargetRef::Player(player));
+                    continuation_targets.push(TargetRef::Player(player));
                 }
+                cont.chain.targets = continuation_targets.clone();
+                propagate_targets_through_search_shuffle(&mut cont.chain, &continuation_targets);
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1573,4 +1576,17 @@ fn resume_with_error_propagation(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     super::engine::resume_pending_continuation_if_priority(state, events)
+}
+
+fn propagate_targets_through_search_shuffle(ability: &mut ResolvedAbility, targets: &[TargetRef]) {
+    let mut cursor = ability;
+    while matches!(cursor.effect, Effect::Shuffle { .. }) {
+        let Some(next) = cursor.sub_ability.as_mut() else {
+            return;
+        };
+        if next.targets.is_empty() {
+            next.targets = targets.to_vec();
+        }
+        cursor = next;
+    }
 }

@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 706
 expression: "&ir"
 ---
 {
@@ -187,6 +188,14 @@ expression: "&ir"
                 {
                   "type": "AddSubtype",
                   "subtype": "Avatar"
+                },
+                {
+                  "type": "SetPower",
+                  "value": 8
+                },
+                {
+                  "type": "SetToughness",
+                  "value": 8
                 }
               ],
               "condition": null,

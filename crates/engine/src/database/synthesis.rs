@@ -2418,6 +2418,7 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
                 alt_ability_cost: None,
+                constraint: None,
             },
         )
         .optional();
@@ -2678,6 +2679,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 mode: CardPlayMode::Cast,
                 cast_transformed: true,
                 alt_ability_cost: None,
+                constraint: None,
             },
         )
         .optional();

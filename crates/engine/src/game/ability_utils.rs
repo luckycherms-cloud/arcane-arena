@@ -1444,7 +1444,10 @@ fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
 }
 
 fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
-    matches!(effect, Effect::ChangeZone { .. } | Effect::Shuffle { .. })
+    matches!(
+        effect,
+        Effect::ChangeZone { .. } | Effect::Shuffle { .. } | Effect::PutAtLibraryPosition { .. }
+    )
 }
 
 fn collect_target_slots_after_deferred_effect(

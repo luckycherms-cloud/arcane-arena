@@ -380,6 +380,7 @@ mod tests {
     use crate::types::ability::{Comparator, FilterProp, QuantityExpr, QuantityRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -837,6 +838,76 @@ mod tests {
         );
         assert_eq!(state.objects[&found].zone, Zone::Hand);
         assert!(state.players[0].hand.contains(&found));
+    }
+
+    #[test]
+    fn beseech_bargained_accept_grants_cast_without_hand_fallback() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::parser::oracle_effect::parse_effect_chain;
+        use crate::types::ability::{
+            AbilityKind, CastPermissionConstraint, CastingPermission, Comparator, QuantityExpr,
+        };
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let found = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Found Spell".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&found).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        let ability = parse_effect_chain(
+            "search your library for a card, exile it face down, then shuffle. if this spell was bargained, you may cast the exiled card without paying its mana cost if that spell's mana value is 4 or less. put the exiled card into your hand if it wasn't cast this way",
+            AbilityKind::Spell,
+        );
+        let mut resolved = build_resolved_from_def(&ability, ObjectId(100), PlayerId(0));
+        resolved.context.additional_cost_paid = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
+        assert!(matches!(state.waiting_for, WaitingFor::SearchChoice { .. }));
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![found] },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        let obj = state.objects.get(&found).unwrap();
+        assert_eq!(obj.zone, Zone::Exile);
+        assert!(!state.players[0].hand.contains(&found));
+        assert!(obj.casting_permissions.iter().any(|permission| matches!(
+            permission,
+            CastingPermission::ExileWithAltCost {
+                cost,
+                constraint:
+                    Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                ..
+            } if *cost == ManaCost::zero()
+        )));
     }
 
     #[test]

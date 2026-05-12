@@ -257,30 +257,14 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             .is_some_and(|obj| has_exile_cast_permission(state, obj, player, state.turn_number))
     }));
 
-    // CR 601.2a + CR 611.2a: Opponent's exiled cards with `ExileWithAltCost`
-    // / `ExileWithAltAbilityCost` are castable only by the player the
-    // resolving effect granted the permission to. When `granted_to` is
-    // `Some(p)` (Jeleva attack-trigger CastFromZone, Discover, Cascade), the
-    // cast is scoped to `p`; when `None` (legacy Silent-Blade Oni / Etali
-    // wiring that pre-dates the binding), fall back to any-opponent-of-owner
-    // semantics. This bypassed `has_exile_cast_permission` historically —
-    // the gate now matches the granted_to filter applied in the cost-reader.
+    // CR 601.2a + CR 611.2a: Opponent's exiled cards with an alt-cost
+    // permission are castable only when that same permission authorizes this
+    // player and the current cast constraints.
     objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner != player
-                && obj.casting_permissions.iter().any(|p| match p {
-                    crate::types::ability::CastingPermission::ExileWithAltCost {
-                        granted_to,
-                        ..
-                    }
-                    | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                        granted_to,
-                        ..
-                    } => match granted_to {
-                        Some(allowed) => *allowed == player,
-                        None => true,
-                    },
-                    _ => false,
+                && obj.casting_permissions.iter().any(|permission| {
+                    exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
                 })
         })
     }));
@@ -653,14 +637,10 @@ fn has_exile_cast_permission(
         || obj.casting_permissions.iter().any(|p| match p {
             crate::types::ability::CastingPermission::AdventureCreature
             | crate::types::ability::CastingPermission::ExileWithEnergyCost => obj.owner == player,
-            crate::types::ability::CastingPermission::ExileWithAltCost { granted_to, .. }
-            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                granted_to,
-                ..
-            } => match granted_to {
-                Some(p) => *p == player,
-                None => obj.owner == player,
-            },
+            crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+                exile_alt_cost_permission_supports_cast(state, obj, player, p, None)
+            }
             crate::types::ability::CastingPermission::PlayFromExile { .. } => false,
             crate::types::ability::CastingPermission::WarpExile {
                 castable_after_turn,
@@ -672,6 +652,103 @@ fn has_exile_cast_permission(
                 obj.owner == player && turn_number > *turn_foretold
             }
         })
+}
+
+fn cast_permission_constraint_allows_cast(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    constraint: &Option<crate::types::ability::CastPermissionConstraint>,
+    resulting_mv: Option<u32>,
+) -> bool {
+    use crate::types::ability::{CastPermissionConstraint, QuantityExpr};
+
+    match constraint {
+        Some(CastPermissionConstraint::ManaValue {
+            comparator,
+            value: QuantityExpr::Fixed { value },
+        }) if resulting_mv.is_none() => {
+            comparator.evaluate(obj.mana_cost.mana_value() as i32, *value)
+        }
+        Some(CastPermissionConstraint::ManaValue { comparator, value }) => {
+            let Some(resulting_mv) = resulting_mv else {
+                return true;
+            };
+            let required = resolve_quantity(state, value, obj.controller, obj.id);
+            comparator.evaluate(resulting_mv as i32, required)
+        }
+        Some(CastPermissionConstraint::CascadeResultingMvBelow { .. }) | None => true,
+    }
+}
+
+fn exile_alt_cost_permission_grants_to_player(
+    player: PlayerId,
+    granted_to: Option<PlayerId>,
+) -> bool {
+    match granted_to {
+        Some(allowed) => allowed == player,
+        None => true,
+    }
+}
+
+pub(super) fn exile_alt_cost_permission_supports_cast(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    permission: &crate::types::ability::CastingPermission,
+    resulting_mv: Option<u32>,
+) -> bool {
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost {
+            granted_to,
+            constraint,
+            ..
+        }
+        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+            granted_to,
+            constraint,
+            ..
+        } => {
+            exile_alt_cost_permission_grants_to_player(player, *granted_to)
+                && cast_permission_constraint_allows_cast(state, obj, constraint, resulting_mv)
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    resulting_mv: u32,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+
+    let mut found_authorizing_permission = false;
+    for permission in &obj.casting_permissions {
+        match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost { granted_to, .. }
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+                granted_to,
+                ..
+            } if exile_alt_cost_permission_grants_to_player(player, *granted_to) => {
+                found_authorizing_permission = true;
+                if exile_alt_cost_permission_supports_cast(
+                    state,
+                    obj,
+                    player,
+                    permission,
+                    Some(resulting_mv),
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    !found_authorizing_permission
 }
 
 fn source_has_collection_counter_play_permission(
@@ -775,26 +852,14 @@ pub(super) fn player_can_spend_as_any_color_for_optional_spell(
 }
 
 /// CR 601.2a + CR 611.2a: Check if an object has an alt-cost cast-from-exile
-/// permission (i.e., the spell may be cast by paying *something other than*
-/// its mana cost) AND that permission either has no `granted_to` binding or
-/// binds to `player`. Used at cross-ownership cast surfaces where the card is
-/// in opponent-owned exile but the grant restricts the caster — Jeleva's
-/// attack-trigger CastFromZone, Discover, Cascade, and the Silent-Blade Oni /
-/// Etali legacy class (which leave `granted_to` as `None` and so fall back to
-/// the historical any-opponent-can-cast semantics).
+/// permission that authorizes this player and satisfies offer-time constraints.
 fn has_alt_cost_permission_for(
     obj: &crate::game::game_object::GameObject,
+    state: &GameState,
     player: PlayerId,
 ) -> bool {
-    obj.casting_permissions.iter().any(|p| match p {
-        crate::types::ability::CastingPermission::ExileWithAltCost { granted_to, .. }
-        | crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-            granted_to, ..
-        } => match granted_to {
-            Some(allowed) => *allowed == player,
-            None => true,
-        },
-        _ => false,
+    obj.casting_permissions.iter().any(|permission| {
+        exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
     })
 }
 
@@ -1295,8 +1360,9 @@ fn prepare_spell_cast_with_variant_override(
     // binding, only player `p` may consume it — see
     // `spell_objects_available_to_cast` for the parallel filter used at the
     // legal-actions surface.
-    let has_unowned_exile_permission =
-        obj.zone == Zone::Exile && obj.owner != player && has_alt_cost_permission_for(obj, player);
+    let has_unowned_exile_permission = obj.zone == Zone::Exile
+        && obj.owner != player
+        && has_alt_cost_permission_for(obj, state, player);
     let castable_zone = has_unowned_exile_permission
         || has_exile_permission
         || (obj.owner == player
@@ -1389,14 +1455,15 @@ fn prepare_spell_cast_with_variant_override(
         // first) cannot accidentally inherit Jeleva's "without paying its mana
         // cost" cost-zero on cards exiled with Jeleva.
         obj.casting_permissions.iter().find_map(|p| match p {
-            crate::types::ability::CastingPermission::ExileWithAltCost {
-                cost, granted_to, ..
-            } if granted_to.is_none() || *granted_to == Some(player) => Some(cost.clone()),
+            crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. }
+                if exile_alt_cost_permission_supports_cast(state, obj, player, p, None) =>
+            {
+                Some(cost.clone())
+            }
             crate::types::ability::CastingPermission::Foretold { cost, .. } => Some(cost.clone()),
-            crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                granted_to,
-                ..
-            } if granted_to.is_none() || *granted_to == Some(player) => {
+            crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+                if exile_alt_cost_permission_supports_cast(state, obj, player, p, None) =>
+            {
                 Some(crate::types::mana::ManaCost::zero())
             }
             _ => None,
@@ -6242,12 +6309,13 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
-        ChosenSubtypeKind, ContinuousModification, ControllerRef, CostCategory, FilterProp,
-        GainLifePlayer, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
-        ManaSpendPermission, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ActivationRestriction, BasicLandType, CastPermissionConstraint, CastVariantPaid,
+        CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
+        ControllerRef, CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant,
+        ManaContribution, ManaProduction, ManaSpendPermission, ModalSelectionCondition,
+        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8995,6 +9063,91 @@ mod tests {
             obj_id,
             &state.objects[&obj_id].mana_cost
         ));
+    }
+
+    fn add_borrowed_exile_sorcery_with_mana_value(
+        state: &mut GameState,
+        card_id: CardId,
+        mana_value: u32,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            card_id,
+            PlayerId(1),
+            "Borrowed Spell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        obj.mana_cost = ManaCost::generic(mana_value);
+        obj_id
+    }
+
+    fn beseech_style_permission() -> CastingPermission {
+        CastingPermission::ExileWithAltCost {
+            cost: ManaCost::zero(),
+            cast_transformed: false,
+            constraint: Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }),
+            granted_to: Some(PlayerId(0)),
+        }
+    }
+
+    #[test]
+    fn mana_value_constrained_exile_permission_rejects_cross_owner_cast() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_borrowed_exile_sorcery_with_mana_value(&mut state, CardId(32), 5);
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .casting_permissions
+            .push(beseech_style_permission());
+
+        assert!(!spell_objects_available_to_cast(&state, PlayerId(0)).contains(&obj_id));
+        assert!(
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(32), &mut Vec::new())
+                .is_err(),
+            "actual cast path must reject a borrowed spell outside the permission's mana-value limit"
+        );
+    }
+
+    #[test]
+    fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = add_borrowed_exile_sorcery_with_mana_value(&mut state, CardId(33), 5);
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.casting_permissions.push(beseech_style_permission());
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                });
+        }
+
+        let waiting =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(33), &mut Vec::new())
+                .expect("unconstrained permission should independently authorize the cast");
+
+        assert_eq!(
+            waiting,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        );
+        assert!(state.stack.iter().any(|entry| entry.id == obj_id));
     }
 
     #[test]

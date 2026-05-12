@@ -42,16 +42,16 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission,
-    ChoiceType, ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard,
-    ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
-    StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
-    UntilCondition,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    CombatDamageScope, Comparator, ConjureCard, ContinuousModification, ControllerRef,
+    DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
+    GainLifePlayer, GameRestriction, ManaProduction, ManaSpendPermission, MultiTargetSpec,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessPayModifier, UntilCondition,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -7513,6 +7513,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
 
     let without_paying = scan_contains_phrase(rest, "without paying its mana cost")
         || scan_contains_phrase(rest, "without paying their mana cost");
+    let constraint = parse_cast_permission_constraint(rest);
 
     // Branch 1: anaphoric forms. Order longer-first ("one of those cards"
     // before "those cards") so the prefix-match doesn't shadow the longer
@@ -7537,6 +7538,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             mode,
             cast_transformed: false,
             alt_ability_cost: None,
+            constraint,
         });
     }
 
@@ -7566,6 +7568,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             mode,
             cast_transformed: false,
             alt_ability_cost: None,
+            constraint,
         });
     }
 
@@ -7616,6 +7619,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             mode,
             cast_transformed: false,
             alt_ability_cost: None,
+            constraint,
         });
     }
 
@@ -7674,6 +7678,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             mode,
             cast_transformed: false,
             alt_ability_cost: None,
+            constraint,
         });
     }
 
@@ -7684,7 +7689,28 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         mode,
         cast_transformed: false,
         alt_ability_cost: None,
+        constraint,
     })
+}
+
+fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    type E<'a> = OracleError<'a>;
+    let (tail, _) = take_until::<_, _, E>("if that spell's mana value is ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = tag::<_, _, E>("if that spell's mana value is ")
+        .parse(tail)
+        .ok()?;
+    let (after_value, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
+    let after_value = after_value.trim_start();
+    let comparator = if tag::<_, _, E>("or less").parse(after_value).is_ok() {
+        Comparator::LE
+    } else if tag::<_, _, E>("or greater").parse(after_value).is_ok() {
+        Comparator::GE
+    } else {
+        Comparator::EQ
+    };
+    Some(CastPermissionConstraint::ManaValue { comparator, value })
 }
 
 /// CR 118.9 + CR 119.4: Recognise an "alternative-cost rider" — text of the
@@ -8859,7 +8885,7 @@ fn wire_optional_cast_decline_fallback(def: &mut AbilityDefinition) {
         && matches!(&*def.effect, Effect::CastFromZone { .. })
         && def.else_ability.is_none()
     {
-        def.else_ability = def.sub_ability.clone();
+        def.else_ability = def.sub_ability.take();
     }
 
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -29084,12 +29110,26 @@ mod snapshot_tests {
             .as_deref()
             .and_then(|shuffle| shuffle.sub_ability.as_deref())
             .expect("shuffle should chain into bargained cast");
-        assert!(matches!(&*cast.effect, Effect::CastFromZone { .. }));
+        match &*cast.effect {
+            Effect::CastFromZone {
+                constraint:
+                    Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }),
+                ..
+            } => {}
+            other => panic!("expected CastFromZone with mana-value constraint, got {other:?}"),
+        }
         assert!(cast.optional);
         assert!(matches!(
             cast.condition,
             Some(AbilityCondition::AdditionalCostPaid { .. })
         ));
+        assert!(
+            cast.sub_ability.is_none(),
+            "accepting the optional cast must not also run the hand fallback"
+        );
 
         let hand_fallback = cast
             .else_ability

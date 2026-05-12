@@ -7,6 +7,7 @@ mod elemental_spectacle_regression;
 mod elusive_otter_repro;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
+mod enlightened_tutor_regression;
 mod evelyn_regression;
 mod export_runtime_canaries;
 mod exquisite_blood_routing;

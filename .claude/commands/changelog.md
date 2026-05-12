@@ -2,14 +2,17 @@ Generate a Discord-ready "What's New" changelog from recent git history.
 
 **Input:** `$ARGUMENTS` — either a date (e.g. "May 7", "2026-05-07", "May 7 1pm MST") or a commit ref (e.g. "abc1234", "v0.1.2"). If empty, default to the last 7 days.
 
+**Step 0: Sync first.** Run `git fetch origin` so the range is computed against current `origin/main`, not a stale local ref. Use `origin/main` (or whichever branch the user names) as the tip in all `git log` invocations below.
+
 **Step 1: Determine the git log range.**
-- If the argument looks like a date/time, convert it to a `--since` flag with appropriate timezone handling (assume MST/MDT if no timezone given).
-- If the argument looks like a commit hash or tag, use `<ref>..HEAD`.
+- If the argument looks like a date/time, convert it **yourself** to a fully-qualified ISO 8601 timestamp with a numeric UTC offset (e.g. `2026-05-11T16:30:00-07:00`) before passing it to `git`. Do **not** hand `git --since` a string containing a named timezone abbreviation like `MST`/`MDT`/`PST` — `git`'s date parser silently mishandles many of these and will quietly truncate the range. If no timezone is given in the input, assume Mountain Time: `-07:00` for MDT (Mar–Nov) or `-07:00`/`-06:00` as appropriate — when unsure, state which offset you used.
+- If the argument looks like a commit hash or tag, use `<ref>..origin/main`.
+- If empty, use `--since="7 days ago"`.
 - Exclude merge commits (`--no-merges`).
 
-**Step 2: Read the commits.**
-- Run `git log` with the determined range, fetching both subject lines and bodies (`--format="%H %s%n%b---"`).
-- Read through all commits to understand the full scope of changes.
+**Step 2: Read the commits — and sanity-check the count.**
+- First run `git log --no-merges <range> --oneline origin/main | cat` and note how many commits came back. If a date-based range returns suspiciously few commits (e.g. only today's work when you asked for "since yesterday afternoon"), the timezone conversion in Step 1 went wrong — recompute the offset and re-run before proceeding. `git log` truncates long output by default, so always pipe through `| cat` (or use `--no-pager`) to see the full list.
+- Then fetch subject lines and bodies for the full range (`--format="%H %s%n%b---" | cat`) and read through every commit to understand the full scope of changes. Cross-reference against the `--oneline` count from the previous step so nothing is dropped.
 
 **Step 3: Synthesize into user-facing changelog.**
 Group related commits and distill into a hyphen-prefixed list for Discord. Follow these rules:

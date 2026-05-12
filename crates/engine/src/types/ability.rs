@@ -1241,6 +1241,12 @@ pub enum CastPermissionConstraint {
         source_mv: u32,
         exiled_misses: Vec<super::identifiers::ObjectId>,
     },
+    /// CR 202.3 + CR 601.2e: The spell's resulting mana value must satisfy
+    /// this predicate for the cast permission to apply.
+    ManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -4988,6 +4994,10 @@ pub enum Effect {
         /// alternative cost (free) or this one (replacement).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alt_ability_cost: Option<AbilityCost>,
+        /// CR 202.3 + CR 601.2e: Optional cast-permission predicate applied
+        /// to the spell being cast from the granted zone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        constraint: Option<CastPermissionConstraint>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {

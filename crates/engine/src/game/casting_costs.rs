@@ -2156,6 +2156,18 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 return handle_cascade_rejection(state, player, object_id, exiled_misses, events);
             }
         }
+        if !super::casting::exile_alt_cost_permissions_accept_resulting_mv(
+            state,
+            object_id,
+            player,
+            resulting_mv,
+        ) {
+            let pending_for_cancel = PendingCast::new(object_id, card_id, ability, cost.clone());
+            super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+            return Err(EngineError::ActionNotAllowed(
+                "Spell mana value does not satisfy the cast permission".to_string(),
+            ));
+        }
     }
 
     // CR 700.14: Snapshot pool size before payment to compute actual mana spent.

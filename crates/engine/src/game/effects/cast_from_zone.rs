@@ -23,16 +23,18 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (without_paying, cast_transformed, alt_ability_cost) = match &ability.effect {
+    let (without_paying, cast_transformed, alt_ability_cost, constraint) = match &ability.effect {
         Effect::CastFromZone {
             without_paying_mana_cost,
             cast_transformed,
             alt_ability_cost,
+            constraint,
             ..
         } => (
             *without_paying_mana_cost,
             *cast_transformed,
             alt_ability_cost.clone(),
+            constraint.clone(),
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
@@ -90,7 +92,7 @@ pub fn resolve(
             let permission = if let Some(cost) = alt_ability_cost.clone() {
                 CastingPermission::ExileWithAltAbilityCost {
                     cost,
-                    constraint: None,
+                    constraint: constraint.clone(),
                     granted_to,
                 }
             } else {
@@ -102,7 +104,7 @@ pub fn resolve(
                 CastingPermission::ExileWithAltCost {
                     cost,
                     cast_transformed,
-                    constraint: None,
+                    constraint: constraint.clone(),
                     granted_to,
                 }
             };
@@ -122,7 +124,9 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{CardPlayMode, Effect, TargetFilter};
+    use crate::types::ability::{
+        CardPlayMode, CastPermissionConstraint, Comparator, Effect, QuantityExpr, TargetFilter,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -154,6 +158,7 @@ mod tests {
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
                 alt_ability_cost: None,
+                constraint: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -187,6 +192,7 @@ mod tests {
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
                 alt_ability_cost: None,
+                constraint: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -217,6 +223,7 @@ mod tests {
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
                 alt_ability_cost: None,
+                constraint: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -245,6 +252,7 @@ mod tests {
                 mode: CardPlayMode::Cast,
                 cast_transformed: false,
                 alt_ability_cost: None,
+                constraint: None,
             },
             vec![],
             ObjectId(999),
@@ -261,6 +269,42 @@ mod tests {
                 kind: EffectKind::CastFromZone,
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn grants_mana_value_constraint_on_permission() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(0), CardId(400));
+        let constraint = CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 4 },
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: Some(constraint.clone()),
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = state.objects.get(&obj_id).unwrap();
+        assert!(obj.casting_permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                constraint: Some(found),
+                ..
+            } if *found == constraint
         )));
     }
 }

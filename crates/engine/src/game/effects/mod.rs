@@ -467,10 +467,14 @@ pub(super) fn resolve_optional_effect_decision(
             resolve_ability_chain(state, &ability, events, depth)?;
         }
         AutoMayChoice::Decline => {
-            if let Some(ref sub) = ability.sub_ability {
-                let mut sub_resolved = sub.as_ref().clone();
-                sub_resolved.context = ability.context.clone();
-                resolve_ability_chain(state, &sub_resolved, events, depth)?;
+            let decline_branch = ability
+                .else_ability
+                .as_ref()
+                .or(ability.sub_ability.as_ref());
+            if let Some(branch) = decline_branch {
+                let mut resolved = branch.as_ref().clone();
+                resolved.context = ability.context.clone();
+                resolve_ability_chain(state, &resolved, events, depth)?;
             }
         }
     }
