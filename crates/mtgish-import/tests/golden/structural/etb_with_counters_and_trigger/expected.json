@@ -11,7 +11,7 @@
           "kind": "Spell",
           "effect": {
             "type": "RemoveCounter",
-            "counter_type": "-1/-1",
+            "counter_type": "M1M1",
             "count": 1,
             "target": {
               "type": "SelfRef"
@@ -49,7 +49,7 @@
           "kind": "Spell",
           "effect": {
             "type": "RemoveCounter",
-            "counter_type": "-1/-1",
+            "counter_type": "M1M1",
             "count": 1,
             "target": {
               "type": "SelfRef"
@@ -90,7 +90,7 @@
           "kind": "Spell",
           "effect": {
             "type": "AddCounter",
-            "counter_type": "-1/-1",
+            "counter_type": "M1M1",
             "count": {
               "type": "Fixed",
               "value": 4

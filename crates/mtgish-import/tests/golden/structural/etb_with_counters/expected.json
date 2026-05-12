@@ -11,7 +11,7 @@
           "kind": "Spell",
           "effect": {
             "type": "AddCounter",
-            "counter_type": "+1/+1",
+            "counter_type": "P1P1",
             "count": {
               "type": "Ref",
               "qty": {
