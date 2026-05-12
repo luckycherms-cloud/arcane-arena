@@ -1267,10 +1267,10 @@ fn counter_match_for(
 ) -> engine::types::counter::CounterMatch {
     use engine::types::counter::CounterMatch;
     use engine::types::counter::CounterType as EngineCT;
-    // PTCounter doesn't have a parameterized variant in the engine — fall
-    // back to a Generic string match keyed on the +N/+M label.
     if let crate::schema::types::CounterType::PTCounter(p, t) = ct {
-        return CounterMatch::OfType(EngineCT::Generic(format!("{p:+}/{t:+}")));
+        return CounterMatch::OfType(engine::types::counter::parse_counter_type(&format!(
+            "{p:+}/{t:+}"
+        )));
     }
     let name = format!("{ct:?}");
     let stripped = name.strip_suffix("Counter").unwrap_or(&name);

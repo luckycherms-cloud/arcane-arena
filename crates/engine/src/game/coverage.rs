@@ -1455,7 +1455,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             let counter = counter_type
                 .as_ref()
                 .map(CounterType::as_str)
-                .unwrap_or("all");
+                .map_or_else(|| "all".to_string(), |counter| counter.into_owned());
             d.push(("counter".into(), format!("{count} {counter}")));
             d.push(("target".into(), fmt_target(target)));
         }

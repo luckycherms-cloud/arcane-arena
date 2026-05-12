@@ -727,26 +727,34 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
-    // CR 613.4c: +1/+1 and -1/-1 counters modify P/T in layer 7c.
+    // CR 613.4c: Power/toughness counters modify P/T in layer 7c.
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            let plus = crate::game::arithmetic::u32_to_i32_saturating(
-                *obj.counters.get(&CounterType::Plus1Plus1).unwrap_or(&0),
+            let (power_delta, toughness_delta) = obj.counters.iter().fold(
+                (0i32, 0i32),
+                |(power_total, toughness_total), (counter_type, count)| {
+                    let Some((power, toughness)) = counter_type.power_toughness_delta() else {
+                        return (power_total, toughness_total);
+                    };
+                    let count = crate::game::arithmetic::u32_to_i32_saturating(*count);
+                    (
+                        power_total.saturating_add(power.saturating_mul(count)),
+                        toughness_total.saturating_add(toughness.saturating_mul(count)),
+                    )
+                },
             );
-            let minus = crate::game::arithmetic::u32_to_i32_saturating(
-                *obj.counters.get(&CounterType::Minus1Minus1).unwrap_or(&0),
-            );
-            let delta = plus.saturating_sub(minus);
-            if delta != 0 {
+            if power_delta != 0 {
                 if let Some(ref mut p) = obj.power {
-                    *p = saturating_pt_add(*p, delta);
+                    *p = saturating_pt_add(*p, power_delta);
                 }
+            }
+            if toughness_delta != 0 {
                 if let Some(ref mut t) = obj.toughness {
-                    *t = saturating_pt_add(*t, delta);
+                    *t = saturating_pt_add(*t, toughness_delta);
                 }
             }
 
-            // CR 306.5b: Loyalty is tracked via loyalty counters. After the layer reset
+            // CR 306.5c: Loyalty is tracked via loyalty counters. After the layer reset
             // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
@@ -2220,6 +2228,45 @@ mod tests {
         assert_eq!(obj.power, Some(i32::MAX));
         assert_eq!(obj.toughness, Some(i32::MAX));
         assert!(obj.toughness.unwrap() > 0);
+    }
+
+    /// CR 122.1a + CR 613.4c: Asymmetric P/T counters modify only the axis
+    /// named by the counter, and stack with the legacy +1/+1 / -1/-1 counters.
+    #[test]
+    fn parameterized_power_toughness_counters_apply_in_layer_7c() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Legacy Counter Host", 4, 4, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: 0,
+                    toughness: -1,
+                },
+                1,
+            );
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: 0,
+                    toughness: -2,
+                },
+                1,
+            );
+            obj.counters.insert(
+                CounterType::PowerToughness {
+                    power: -1,
+                    toughness: 0,
+                },
+                2,
+            );
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+
+        evaluate_layers(&mut state);
+
+        let obj = &state.objects[&id];
+        assert_eq!(obj.power, Some(3));
+        assert_eq!(obj.toughness, Some(2));
     }
 
     #[test]

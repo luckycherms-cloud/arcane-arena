@@ -133,22 +133,13 @@ pub(super) fn handle_replacement_choice(
                     count,
                     ..
                 } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-                        *entry = entry.saturating_sub(count);
-                        if matches!(
-                            counter_type,
-                            crate::types::counter::CounterType::Plus1Plus1
-                                | crate::types::counter::CounterType::Minus1Minus1
-                        ) {
-                            state.layers_dirty = true;
-                        }
-                        events.push(GameEvent::CounterRemoved {
-                            object_id,
-                            counter_type,
-                            count,
-                        });
-                    }
+                    effects::counters::apply_counter_removal(
+                        state,
+                        object_id,
+                        counter_type,
+                        count,
+                        events,
+                    );
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
                 ProposedEvent::Tap { object_id, .. } => {

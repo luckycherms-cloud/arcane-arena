@@ -1468,10 +1468,7 @@ pub(crate) fn counter_type_to_engine(
     use engine::types::counter::CounterType as E;
     use CounterType as S;
     Ok(match ct {
-        S::PTCounter(1, 1) => E::Plus1Plus1,
-        S::PTCounter(-1, -1) => E::Minus1Minus1,
-        // Other PT shapes (e.g. +0/+1) are rare; fall through to generic.
-        S::PTCounter(p, t) => E::Generic(format!("{p:+}/{t:+}")),
+        S::PTCounter(p, t) => engine::types::counter::parse_counter_type(&format!("{p:+}/{t:+}")),
 
         S::LoyaltyCounter => E::Loyalty,
         S::DefenseCounter => E::Defense,

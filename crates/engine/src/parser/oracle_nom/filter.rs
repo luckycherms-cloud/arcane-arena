@@ -15,6 +15,8 @@ use super::error::OracleResult;
 use super::primitives::{parse_article, parse_pt_modifier};
 use super::quantity::parse_quantity_expr_number;
 use crate::types::ability::{Comparator, ControllerRef, FilterProp, QuantityExpr};
+use crate::types::counter::parse_counter_type;
+#[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -146,13 +148,7 @@ fn parse_with_counter_property(input: &str) -> OracleResult<'_, FilterProp> {
     let (rest, _) = tag(" counter").parse(rest)?;
     // Consume optional "s" for plural
     let rest = rest.strip_prefix('s').unwrap_or(rest);
-    let counter_type = if p == 1 && t == 1 {
-        CounterType::Plus1Plus1
-    } else if p == -1 && t == -1 {
-        CounterType::Minus1Minus1
-    } else {
-        CounterType::Generic(format!("{:+}/{:+}", p, t))
-    };
+    let counter_type = parse_counter_type(&format!("{p:+}/{t:+}"));
     Ok((
         rest,
         FilterProp::CountersGE {

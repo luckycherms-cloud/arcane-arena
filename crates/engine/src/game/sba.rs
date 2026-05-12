@@ -2034,6 +2034,26 @@ mod tests {
         assert!(!obj.counters.contains_key(&CounterType::Minus1Minus1));
     }
 
+    #[test]
+    fn counter_cancellation_does_not_cancel_other_power_toughness_counters() {
+        let mut state = setup();
+        let id = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let pt_counter = CounterType::PowerToughness {
+            power: 0,
+            toughness: -1,
+        };
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters.insert(CounterType::Plus1Plus1, 1);
+        obj.counters.insert(pt_counter.clone(), 1);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+        assert_eq!(obj.counters.get(&pt_counter).copied(), Some(1));
+    }
+
     // --- CR 704.5d: Token cease-to-exist tests ---
 
     #[test]

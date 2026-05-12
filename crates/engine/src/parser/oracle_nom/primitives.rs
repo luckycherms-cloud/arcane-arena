@@ -257,21 +257,24 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
     .parse(input)
 }
 
-/// Parse a counter type: `"+1/+1"`, `"-1/-1"`, or one of the named counter
-/// types recognized by Oracle text (`loyalty`, `charge`, `lore`, …).
+/// Parse a counter type: power/toughness counter notation (`+1/+1`,
+/// `-0/-1`, etc.) or one of the named counter types recognized by Oracle text
+/// (`loyalty`, `charge`, `lore`, …).
 ///
 /// Returns the canonical `CounterType` enum via the single authoritative
 /// mapping in `crate::types::counter::parse_counter_type`. Unrecognized
 /// tokens from the named-type branch fall through to `CounterType::Generic`
 /// through that mapping — so callers never re-parse the same token.
 pub fn parse_counter_type_typed(input: &str) -> OracleResult<'_, CounterType> {
-    let (rest, raw) = alt((
-        map(tag("+1/+1"), |s: &str| s),
-        map(tag("-1/-1"), |s: &str| s),
-        parse_named_counter_type,
+    alt((
+        map(parse_pt_modifier, |(power, toughness)| {
+            crate::types::counter::parse_counter_type(&format!("{power:+}/{toughness:+}"))
+        }),
+        map(parse_named_counter_type, |raw| {
+            crate::types::counter::parse_counter_type(raw)
+        }),
     ))
-    .parse(input)?;
-    Ok((rest, crate::types::counter::parse_counter_type(raw)))
+    .parse(input)
 }
 
 /// Parse a named counter type: "loyalty", "charge", "lore", "defense", etc.
@@ -1122,6 +1125,39 @@ mod tests {
         let (rest, ct) = parse_counter_type_typed("+1/+1 counter").unwrap();
         assert_eq!(ct, CounterType::Plus1Plus1);
         assert_eq!(rest, " counter");
+    }
+
+    #[test]
+    fn test_parse_counter_type_legacy_asymmetric_pt() {
+        let (rest, ct) = parse_counter_type_typed("-0/-1 counter").unwrap();
+        assert_eq!(
+            ct,
+            CounterType::PowerToughness {
+                power: 0,
+                toughness: -1
+            }
+        );
+        assert_eq!(rest, " counter");
+
+        let (rest, ct) = parse_counter_type_typed("-0/-2 counters").unwrap();
+        assert_eq!(
+            ct,
+            CounterType::PowerToughness {
+                power: 0,
+                toughness: -2
+            }
+        );
+        assert_eq!(rest, " counters");
+
+        let (rest, ct) = parse_counter_type_typed("-1/-0 counters").unwrap();
+        assert_eq!(
+            ct,
+            CounterType::PowerToughness {
+                power: -1,
+                toughness: 0
+            }
+        );
+        assert_eq!(rest, " counters");
     }
 
     #[test]

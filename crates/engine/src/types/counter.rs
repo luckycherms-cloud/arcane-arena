@@ -1,5 +1,6 @@
 use crate::types::keywords::KeywordKind;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 /// Counter types serialize as flat strings so they can be used as JSON map keys
 /// in `HashMap<CounterType, u32>`. Without this, `Generic("quest")` would serialize
@@ -8,6 +9,14 @@ use serde::{Deserialize, Serialize};
 pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,
+    /// CR 122.1a + CR 613.4c: A counter that modifies power and toughness by
+    /// independent deltas. `+1/+1` and `-1/-1` keep their legacy variants and
+    /// serialized keys for compatibility; asymmetric legacy counters use this
+    /// parameterized form instead of proliferating one-off variants.
+    PowerToughness {
+        power: i32,
+        toughness: i32,
+    },
     Loyalty,
     /// CR 122.1g + CR 310.4: The number of defense counters on a battle on the
     /// battlefield indicates its defense. A battle with 0 defense is put into
@@ -54,28 +63,47 @@ const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
 ];
 
 impl CounterType {
-    pub fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> Cow<'_, str> {
         match self {
-            CounterType::Plus1Plus1 => "P1P1",
-            CounterType::Minus1Minus1 => "M1M1",
-            CounterType::Loyalty => "loyalty",
-            CounterType::Defense => "defense",
-            CounterType::Stun => "stun",
-            CounterType::Lore => "lore",
-            CounterType::Time => "time",
+            CounterType::Plus1Plus1 => Cow::Borrowed("P1P1"),
+            CounterType::Minus1Minus1 => Cow::Borrowed("M1M1"),
+            CounterType::PowerToughness { power, toughness } => {
+                Cow::Owned(format_power_toughness_counter(*power, *toughness))
+            }
+            CounterType::Loyalty => Cow::Borrowed("loyalty"),
+            CounterType::Defense => Cow::Borrowed("defense"),
+            CounterType::Stun => Cow::Borrowed("stun"),
+            CounterType::Lore => Cow::Borrowed("lore"),
+            CounterType::Time => Cow::Borrowed("time"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
                 .map(|(name, _)| *name)
-                .expect("KeywordKind stored in CounterType::Keyword must be in KEYWORD_COUNTERS"),
-            CounterType::Generic(s) => s.as_str(),
+                .expect("KeywordKind stored in CounterType::Keyword must be in KEYWORD_COUNTERS")
+                .into(),
+            CounterType::Generic(s) => Cow::Borrowed(s.as_str()),
+        }
+    }
+
+    pub fn power_toughness_delta(&self) -> Option<(i32, i32)> {
+        match self {
+            CounterType::Plus1Plus1 => Some((1, 1)),
+            CounterType::Minus1Minus1 => Some((-1, -1)),
+            CounterType::PowerToughness { power, toughness } => Some((*power, *toughness)),
+            CounterType::Loyalty
+            | CounterType::Defense
+            | CounterType::Stun
+            | CounterType::Lore
+            | CounterType::Time
+            | CounterType::Keyword(_)
+            | CounterType::Generic(_) => None,
         }
     }
 }
 
 impl serde::Serialize for CounterType {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
+        serializer.serialize_str(self.as_str().as_ref())
     }
 }
 
@@ -131,16 +159,121 @@ pub fn parse_counter_type(text: &str) -> CounterType {
         "stun" => CounterType::Stun,
         "lore" | "LORE" => CounterType::Lore,
         "time" | "TIME" => CounterType::Time,
-        other => {
-            let lower = other.to_lowercase();
-            if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
-                CounterType::Keyword(*kind)
-            } else {
-                // Normalize generic counter names to lowercase so that sources that
-                // emit different cases (e.g. replacement parser emits "MINING", cost
-                // parser emits "mining") resolve to the same HashMap key at runtime.
-                CounterType::Generic(lower)
+        other => parse_parameterized_or_named_counter_type(other),
+    }
+}
+
+fn parse_parameterized_or_named_counter_type(other: &str) -> CounterType {
+    if let Some((power, toughness)) = parse_power_toughness_counter(other) {
+        return CounterType::PowerToughness { power, toughness };
+    }
+
+    let lower = other.to_lowercase();
+    if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
+        CounterType::Keyword(*kind)
+    } else {
+        // Normalize generic counter names to lowercase so that sources that
+        // emit different cases (e.g. replacement parser emits "MINING", cost
+        // parser emits "mining") resolve to the same HashMap key at runtime.
+        CounterType::Generic(lower)
+    }
+}
+
+fn parse_power_toughness_counter(text: &str) -> Option<(i32, i32)> {
+    let (power, toughness) = text.split_once('/')?;
+    let power = parse_signed_counter_delta(power)?;
+    let toughness = parse_signed_counter_delta(toughness)?;
+    Some((power, toughness))
+}
+
+fn parse_signed_counter_delta(text: &str) -> Option<i32> {
+    let text = text.trim();
+    if text.len() < 2 {
+        return None;
+    }
+    let (sign, digits) = text.split_at(1);
+    let magnitude = digits.parse::<i32>().ok()?;
+    match sign {
+        "+" => Some(magnitude),
+        "-" => Some(-magnitude),
+        _ => None,
+    }
+}
+
+fn format_power_toughness_counter(power: i32, toughness: i32) -> String {
+    format!(
+        "{}/{}",
+        format_counter_delta(power, toughness),
+        format_counter_delta(toughness, power)
+    )
+}
+
+fn format_counter_delta(value: i32, paired_value: i32) -> String {
+    if value == 0 && paired_value < 0 {
+        "-0".to_string()
+    } else {
+        format!("{value:+}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_counter_type, CounterType};
+
+    #[test]
+    fn parses_legacy_power_toughness_counter_deltas() {
+        assert_eq!(
+            parse_counter_type("-0/-1"),
+            CounterType::PowerToughness {
+                power: 0,
+                toughness: -1
             }
-        }
+        );
+        assert_eq!(
+            parse_counter_type("-0/-2"),
+            CounterType::PowerToughness {
+                power: 0,
+                toughness: -2
+            }
+        );
+        assert_eq!(
+            parse_counter_type("-1/-0"),
+            CounterType::PowerToughness {
+                power: -1,
+                toughness: 0
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_existing_counter_key_compatibility() {
+        assert_eq!(parse_counter_type("+1/+1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("-1/-1"), CounterType::Minus1Minus1);
+        assert_eq!(parse_counter_type("P1P1"), CounterType::Plus1Plus1);
+        assert_eq!(parse_counter_type("M1M1"), CounterType::Minus1Minus1);
+        assert_eq!(
+            parse_counter_type("MINING"),
+            CounterType::Generic("mining".to_string())
+        );
+    }
+
+    #[test]
+    fn serializes_parameterized_power_toughness_counter() {
+        assert_eq!(
+            serde_json::to_string(&CounterType::PowerToughness {
+                power: 0,
+                toughness: -1
+            })
+            .unwrap(),
+            "\"-0/-1\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CounterType::PowerToughness {
+                power: -1,
+                toughness: 0
+            })
+            .unwrap(),
+            "\"-1/-0\""
+        );
     }
 }

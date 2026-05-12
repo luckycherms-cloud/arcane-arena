@@ -14,7 +14,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
-/// CR 306.5b + CR 310.4c: After mutating the counter map, re-derive the
+/// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
 /// characteristic stay in lockstep. This is the single site outside
 /// `evaluate_layers` that writes those fields.
@@ -24,7 +24,7 @@ use crate::types::proposed_event::ProposedEvent;
 /// evaluated directly from the counter map at read time.
 fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) {
     match counter_type {
-        // CR 306.5b: A planeswalker's loyalty equals the number of loyalty counters on it.
+        // CR 306.5c: A planeswalker's loyalty equals the number of loyalty counters on it.
         CounterType::Loyalty => {
             obj.loyalty = Some(
                 obj.counters
@@ -46,6 +46,7 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         // (read by the suspend upkeep / vanishing triggers) — no derived field.
         CounterType::Plus1Plus1
         | CounterType::Minus1Minus1
+        | CounterType::PowerToughness { .. }
         | CounterType::Stun
         | CounterType::Lore
         | CounterType::Time
@@ -54,21 +55,18 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
     }
 }
 
-/// CR 613.1d: Mark layers dirty if this counter type projects into a derived
-/// characteristic computed by the layer system. P1P1/M1M1 feed layer 7c;
+/// Mark layers dirty if this counter type projects into a derived characteristic
+/// computed by the layer system. P/T counters feed layer 7c (CR 613.4c);
 /// Loyalty/Defense are cached fields mirrored from the counter map; keyword
-/// counters grant abilities at layer 6 (CR 122.1b). Setting `layers_dirty`
-/// for these is defensive — the layer reset/re-derive path is idempotent
-/// when counters already match.
-fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
-    matches!(
-        counter_type,
-        CounterType::Plus1Plus1
-            | CounterType::Minus1Minus1
-            | CounterType::Loyalty
-            | CounterType::Defense
-            | CounterType::Keyword(_)
-    )
+/// counters grant abilities at layer 6 (CR 613.1f + CR 122.1b). Setting
+/// `layers_dirty` for these is defensive — the layer reset/re-derive path is
+/// idempotent when counters already match.
+pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
+    counter_type.power_toughness_delta().is_some()
+        || matches!(
+            counter_type,
+            CounterType::Loyalty | CounterType::Defense | CounterType::Keyword(_)
+        )
 }
 
 /// CR 614.1: Add a counter to an object through the replacement pipeline.
@@ -141,7 +139,7 @@ pub(crate) fn apply_counter_addition(
     let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
     *entry += count;
 
-    // CR 306.5b / CR 310.4c: Keep obj.loyalty / obj.defense in
+    // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
@@ -179,6 +177,42 @@ pub(crate) fn apply_counter_addition(
     });
 }
 
+/// CR 122.1: Apply an already-accepted counter removal, clamping to the number
+/// actually present and keeping derived counter-backed characteristics in sync.
+pub(crate) fn apply_counter_removal(
+    state: &mut GameState,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return;
+    };
+
+    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
+    let removed = (*entry).min(count);
+    *entry = entry.saturating_sub(count);
+
+    // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
+    // sync with the counter map — the field IS the counter count.
+    sync_derived_from_counters(obj, &counter_type);
+
+    if counter_type_affects_layers(&counter_type) {
+        state.layers_dirty = true;
+    }
+
+    // CR 122.1: Only emit when counters were actually removed,
+    // matching the semantics of the legacy in-line path.
+    if removed > 0 {
+        events.push(GameEvent::CounterRemoved {
+            object_id,
+            counter_type,
+            count: removed,
+        });
+    }
+}
+
 /// CR 614.1: Remove counters from an object through the replacement pipeline.
 ///
 /// Single authority for counter removal, mirroring `add_counter_with_replacement`.
@@ -212,29 +246,7 @@ pub fn remove_counter_with_replacement(
                 ..
             } = event
             {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-                    let removed = (*entry).min(count);
-                    *entry = entry.saturating_sub(count);
-
-                    // CR 306.5b / CR 310.4c: Keep obj.loyalty / obj.defense in
-                    // sync with the counter map — the field IS the counter count.
-                    sync_derived_from_counters(obj, &counter_type);
-
-                    if counter_type_affects_layers(&counter_type) {
-                        state.layers_dirty = true;
-                    }
-
-                    // CR 122.1: Only emit when counters were actually removed,
-                    // matching the semantics of the legacy in-line path.
-                    if removed > 0 {
-                        events.push(GameEvent::CounterRemoved {
-                            object_id,
-                            counter_type,
-                            count: removed,
-                        });
-                    }
-                }
+                apply_counter_removal(state, object_id, counter_type, count, events);
             }
         }
         ReplacementResult::Prevented => {}
@@ -815,6 +827,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 2);
+    }
+
+    #[test]
+    fn parameterized_power_toughness_counter_add_and_remove_marks_layers_dirty() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let counter_type = CounterType::PowerToughness {
+            power: 0,
+            toughness: -1,
+        };
+        let mut events = Vec::new();
+
+        state.layers_dirty = false;
+        apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            obj_id,
+            counter_type.clone(),
+            1,
+            &mut events,
+        );
+        assert!(state.layers_dirty);
+
+        state.layers_dirty = false;
+        apply_counter_removal(&mut state, obj_id, counter_type, 1, &mut events);
+        assert!(state.layers_dirty);
     }
 
     #[test]
@@ -1416,7 +1460,7 @@ mod tests {
         );
     }
 
-    /// CR 306.5b: Adding a Loyalty counter through the resolver must keep
+    /// CR 306.5c: Adding a Loyalty counter through the resolver must keep
     /// `obj.loyalty` in lockstep with `counters[Loyalty]`. This is the
     /// invariant that prevents the Tezzeret-class display bug where the
     /// loyalty trigger fires but the visible loyalty doesn't update.
@@ -1454,11 +1498,11 @@ mod tests {
         assert_eq!(
             obj.loyalty,
             Some(5),
-            "obj.loyalty must mirror counters[Loyalty] (CR 306.5b)"
+            "obj.loyalty must mirror counters[Loyalty] (CR 306.5c)"
         );
     }
 
-    /// CR 306.5b: Removing a Loyalty counter through the resolver must keep
+    /// CR 306.5c: Removing a Loyalty counter through the resolver must keep
     /// `obj.loyalty` in lockstep, including the saturating clamp at zero.
     #[test]
     fn remove_loyalty_counter_syncs_loyalty_field_with_clamp() {
@@ -1534,7 +1578,7 @@ mod tests {
         );
     }
 
-    /// CR 613.1 + CR 306.5b: After the resolver syncs `obj.loyalty`, a forced
+    /// CR 613.1 + CR 306.5c: After the resolver syncs `obj.loyalty`, a forced
     /// `evaluate_layers` call must leave the value unchanged — the layer
     /// reset/re-derive path is idempotent when counters and field already match.
     #[test]
