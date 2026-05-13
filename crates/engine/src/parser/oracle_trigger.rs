@@ -2850,6 +2850,15 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         }
     }
 
+    // CR 608.2c + CR 603.7c: In delayed triggers created by targeted spells,
+    // "that <noun>" refers back to the parent ability's chosen target.
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("that ")).parse(text) {
+        let noun_end = rest.find(' ').unwrap_or(rest.len());
+        if noun_end > 0 {
+            return (TargetFilter::ParentTarget, rest[noun_end..].trim_start());
+        }
+    }
+
     // "equipped creature" / "enchanted creature/land/permanent" / "enchanted <basic-type>"
     // → AttachedTo. The Enchant keyword already constrains the attach target's type,
     // so `AttachedTo` alone is sufficient here (CR 702.5a). Utopia Sprawl's
@@ -3037,8 +3046,6 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// - "to an opponent"      → opponent-controlled TypedFilter
 /// - "to you"              → `Controller`
 ///
-/// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
-/// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_verb.trim_start())
@@ -3046,6 +3053,18 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
     // Use nom alt() to match damage target qualifiers (input already lowercase)
     fn parse_damage_target(input: &str) -> OracleResult<'_, TargetFilter> {
         alt((
+            value(
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                    ],
+                },
+                alt((
+                    tag("a player or planeswalker"),
+                    tag("a player or a planeswalker"),
+                )),
+            ),
             value(TargetFilter::Player, tag("a player")),
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -6422,8 +6441,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, CastingPermission,
         Comparator, ContinuousModification, ControllerRef, CountScope, DamageModification,
-        Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope,
-        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        DelayedTriggerCondition, Duration, Effect, FilterProp, ManaSpendPermission, ObjectScope,
+        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -6730,6 +6750,89 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::DamageDone);
         assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn that_creature_subject_resolves_to_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (_, def) = parse_trigger_condition(
+            "that creature deals combat damage to a player or planeswalker",
+            &mut ctx,
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_source, Some(TargetFilter::ParentTarget));
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Player,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn that_permanent_attacks_subject_resolves_to_parent_target() {
+        let mut ctx = ParseContext::default();
+        let (_, def) = parse_trigger_condition("that permanent attacks", &mut ctx);
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_card, Some(TargetFilter::ParentTarget));
+    }
+
+    #[test]
+    fn creature_subject_still_returns_typed_filter() {
+        let mut ctx = ParseContext::default();
+        let (_, def) =
+            parse_trigger_condition("a creature deals combat damage to a player", &mut ctx);
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+    }
+
+    #[test]
+    fn hunters_insight_class_builds_whenever_event_delayed_trigger() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Choose target creature you control. Whenever that creature deals combat damage to a player or planeswalker this turn, draw that many cards.",
+            "Hunter's Insight",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(parsed.abilities.len(), 1);
+
+        let delayed = parsed.abilities[0]
+            .sub_ability
+            .as_deref()
+            .expect("target choice should chain into delayed trigger");
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = delayed.effect.as_ref()
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+        };
+        let DelayedTriggerCondition::WheneverEvent { trigger } = condition else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::DamageDone);
+        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(trigger.valid_source, Some(TargetFilter::ParentTarget));
+
+        let Effect::Draw { count, target } = effect.effect.as_ref() else {
+            panic!("expected Draw, got {:?}", effect.effect);
+        };
+        assert_eq!(
+            *count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(*target, TargetFilter::Controller);
     }
 
     // Thrummingbird: pins the trigger event shape AND the parsed execute body
