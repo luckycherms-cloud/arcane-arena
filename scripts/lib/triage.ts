@@ -314,27 +314,6 @@ export async function triageReports(reports: ReportItem[]): Promise<TriageItem[]
 
       // --- First in thread (primary candidate) ---
 
-      // Stale / likely fixed: all cards are fully parsed
-      if (parserStatus === "fully_parsed") {
-        result.push({
-          report_id: r.report_id,
-          classification: "stale_likely_fixed",
-          reason: "All referenced cards have no Unimplemented effects or Unknown triggers",
-          thread_id: r.thread_id,
-          thread_name: r.thread_name,
-          message_id: r.message_id,
-          cards: r.cards,
-          summary,
-          extraction_confidence: r.extraction_confidence,
-          source_url: sourceUrl,
-          parser_status: parserStatus,
-          proposed_action: "needs_human_review",
-          dedup_group,
-        });
-        threadHasPrimary = true;
-        continue;
-      }
-
       // Determine dedup action
       let proposed_action: TriageItem["proposed_action"];
 
