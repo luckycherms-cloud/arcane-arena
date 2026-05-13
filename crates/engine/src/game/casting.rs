@@ -7628,6 +7628,192 @@ mod tests {
     }
 
     #[test]
+    fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
+        use super::super::engine::apply_as_current;
+        use crate::ai_support::candidate_actions_broad;
+        use crate::types::ability::{AbilityCost, QuantityRef};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(951),
+            PlayerId(0),
+            "Minimum X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CopySpell {
+                    target: TargetFilter::StackAbility {
+                        controller: Some(ControllerRef::You),
+                    },
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                ],
+            });
+            ability.repeat_for = Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            });
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+
+        let target_entry = ObjectId(900);
+        state.stack.push_back(StackEntry {
+            id: target_entry,
+            source_id: ObjectId(901),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(901),
+                ability: ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    ObjectId(901),
+                    PlayerId(0),
+                ),
+            },
+        });
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target_entry)],
+                },
+            )
+            .unwrap();
+        }
+
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { min, max, .. } => {
+                assert_eq!(min, 1);
+                assert_eq!(max, 1);
+            }
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+        let choose_x_candidates: Vec<u32> = candidate_actions_broad(&state)
+            .iter()
+            .filter_map(|candidate| match candidate.action {
+                GameAction::ChooseX { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(choose_x_candidates, vec![1]);
+
+        let zero_result = apply_as_current(&mut state, GameAction::ChooseX { value: 0 });
+        assert!(zero_result.is_err(), "ChooseX below min should error");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseXValue { min: 1, .. }
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
+        assert!(
+            state.objects[&source].tapped,
+            "accepted X=1 should pay deferred tap cost"
+        );
+        assert!(
+            state.stack.iter().any(|entry| matches!(
+                &entry.kind,
+                StackEntryKind::ActivatedAbility { source_id, .. } if *source_id == source
+            )),
+            "accepted X=1 should push the activated ability"
+        );
+    }
+
+    #[test]
+    fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityCost, QuantityRef};
+
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(952),
+            PlayerId(0),
+            "Unpayable Minimum X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![ManaCostShard::X, ManaCostShard::X],
+                            generic: 0,
+                        },
+                    },
+                ],
+            });
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        );
+
+        assert!(result.is_err(), "min X=1 with max X=0 must be rejected");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "engine must not enter an impossible ChooseXValue state"
+        );
+        assert!(
+            state.pending_cast.is_none(),
+            "failed activation must clear pending cast state"
+        );
+        assert!(
+            !state.objects[&source].tapped,
+            "failed activation must not pay deferred tap cost"
+        );
+    }
+
+    #[test]
     fn activated_discard_cost_prompts_and_resumes_activation() {
         use super::super::engine::apply_as_current;
         use crate::types::ability::{AbilityCost, AbilityKind, Effect};
@@ -8402,6 +8588,66 @@ mod tests {
             }
             other => panic!("expected ChooseXValue, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn x_cost_spell_minimum_above_payable_max_rejects_before_choose_x() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::QuantityRef;
+
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(905),
+            PlayerId(0),
+            "Unpayable Minimum X Sorcery".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    target: TargetFilter::Controller,
+                },
+            );
+            ability.min_x_value = 1;
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(905),
+                targets: vec![],
+            },
+        );
+
+        assert!(result.is_err(), "min X=1 with max X=0 must be rejected");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "engine must not enter an impossible ChooseXValue state"
+        );
+        assert!(
+            state.pending_cast.is_none(),
+            "failed spell cast must clear pending cast state"
+        );
+        assert!(
+            state.stack.iter().all(|entry| entry.id != obj_id),
+            "failed spell cast must remove its announcement placeholder"
+        );
     }
 
     /// Invalid X values (exceeding max) must be rejected.

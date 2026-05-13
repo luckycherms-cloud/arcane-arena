@@ -538,7 +538,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
         TargetFilter::Any

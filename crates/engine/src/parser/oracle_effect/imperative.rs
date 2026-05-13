@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{eof, map, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -2287,7 +2287,15 @@ pub(super) fn parse_utility_imperative_ast(
                 text: text.to_string(),
             }),
             "copy" => {
-                let (target, _rem) = parse_target(rest);
+                let rest_lower = &lower[lower.len() - rest.len()..];
+                let (target, _rem) = if let Some((target, rem_lower)) =
+                    parse_copy_stack_ability_target(rest_lower)
+                {
+                    let rem = &rest[rest.len() - rem_lower.len()..];
+                    (target, rem)
+                } else {
+                    parse_target(rest)
+                };
                 #[cfg(debug_assertions)]
                 assert_no_compound_remainder(_rem, text);
                 Some(UtilityImperativeAst::Copy { target })
@@ -2402,6 +2410,51 @@ pub(super) fn parse_utility_imperative_ast(
         });
     }
     None
+}
+
+fn parse_copy_stack_ability_target(input: &str) -> Option<(TargetFilter, &str)> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("target "))
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("activated or triggered ability"),
+        tag("triggered or activated ability"),
+        tag("activated ability"),
+        tag("triggered ability"),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = nom::character::complete::multispace0::<_, OracleError<'_>>(input).ok()?;
+    if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("you control").parse(input) {
+        return Some((
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You),
+            },
+            rem,
+        ));
+    }
+    if input.is_empty()
+        || all_consuming(tag::<_, _, OracleError<'_>>("."))
+            .parse(input)
+            .is_ok()
+    {
+        return Some((TargetFilter::StackAbility { controller: None }, input));
+    }
+    None
+}
+
+pub(super) fn stack_ability_filter_from_text(input: &str) -> TargetFilter {
+    let controller = if nom_primitives::scan_contains(input, "you control") {
+        Some(ControllerRef::You)
+    } else if nom_primitives::scan_contains(input, "opponents control")
+        || nom_primitives::scan_contains(input, "opponent controls")
+        || nom_primitives::scan_contains(input, "opponent's control")
+    {
+        Some(ControllerRef::Opponent)
+    } else {
+        None
+    };
+    TargetFilter::StackAbility { controller }
 }
 
 fn parse_explicit_targeted_attach(
@@ -3738,7 +3791,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         // CR 118.12: Parse "unless pays" even for ability counters.
         let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
-            target: TargetFilter::StackAbility,
+            target: stack_ability_filter_from_text(rest),
             source_static: None,
             unless_pay,
             all: mass_consumed,
@@ -7650,6 +7703,36 @@ mod tests {
                 "expected no match for: {text}"
             );
         }
+    }
+
+    #[test]
+    fn parse_copy_stack_ability_target_preserves_unknown_qualifier_remainder() {
+        let controlled =
+            parse_copy_stack_ability_target("target activated or triggered ability you control")
+                .expect("controlled stack ability target should parse");
+        assert_eq!(controlled.1, "");
+        assert!(matches!(
+            controlled.0,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
+        ));
+
+        let unscoped = parse_copy_stack_ability_target("target triggered ability")
+            .expect("unqualified stack ability target should parse");
+        assert_eq!(unscoped.1, "");
+        assert!(matches!(
+            unscoped.0,
+            TargetFilter::StackAbility { controller: None }
+        ));
+
+        assert!(
+            parse_copy_stack_ability_target(
+                "target activated or triggered ability you don't control"
+            )
+            .is_none(),
+            "unknown qualifier must not widen to an unscoped StackAbility target"
+        );
     }
 
     #[test]

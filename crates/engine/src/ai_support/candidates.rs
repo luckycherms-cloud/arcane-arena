@@ -1837,7 +1837,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
-        WaitingFor::ChooseXValue { player, max, .. } => (0..=*max)
+        WaitingFor::ChooseXValue {
+            player, min, max, ..
+        } => (*min..=*max)
             .map(|value| {
                 candidate(
                     GameAction::ChooseX { value },

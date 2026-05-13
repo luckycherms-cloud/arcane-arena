@@ -115,6 +115,8 @@ mod tests {
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,

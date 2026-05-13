@@ -1963,7 +1963,10 @@ pub enum TargetFilter {
     },
     /// Matches non-mana activated or triggered abilities on the stack.
     /// Used by "counter target activated or triggered ability" effects.
-    StackAbility,
+    StackAbility {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<ControllerRef>,
+    },
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
@@ -6963,6 +6966,13 @@ pub struct AbilityDefinition {
     /// Produced by "for each [X], [effect]" leading patterns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// Minimum legal announced value for X. Defaults to zero; set to one by
+    /// "X can't be 0" annotations.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub min_x_value: u32,
+    /// Stack-copy restriction from "This ability can't be copied."
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cant_be_copied: bool,
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7034,6 +7044,8 @@ impl AbilityDefinition {
             modal: None,
             mode_abilities: Vec::new(),
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             cost_reduction: None,
             forward_result: false,
             player_scope: None,
@@ -8966,6 +8978,13 @@ pub struct ResolvedAbility {
     /// CR 609.3: Repeat this ability N times (from "for each [X], [effect]").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat_for: Option<QuantityExpr>,
+    /// Minimum legal announced value for X. Defaults to zero; set to one by
+    /// "X can't be 0" annotations.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub min_x_value: u32,
+    /// Stack-copy restriction from "This ability can't be copied."
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cant_be_copied: bool,
     /// When true, moved/created objects from this effect are forwarded to the sub_ability.
     #[serde(default)]
     pub forward_result: bool,
@@ -9036,6 +9055,8 @@ impl ResolvedAbility {
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,
@@ -9178,6 +9199,14 @@ pub enum EffectError {
     ChainTooDeep,
     #[error("unregistered effect type: {0}")]
     Unregistered(String),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -9364,6 +9393,32 @@ mod tests {
         let obj = TargetRef::Object(ObjectId(0));
         let plr = TargetRef::Player(PlayerId(0));
         assert_ne!(obj, plr);
+    }
+
+    #[test]
+    fn stack_ability_filter_accepts_legacy_unit_json() {
+        let filter: TargetFilter = serde_json::from_str(r#"{"type":"StackAbility"}"#).unwrap();
+        assert_eq!(filter, TargetFilter::StackAbility { controller: None });
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#"{"type":"StackAbility"}"#
+        );
+    }
+
+    #[test]
+    fn stack_ability_filter_roundtrips_controller_scope() {
+        let filter: TargetFilter =
+            serde_json::from_str(r#"{"type":"StackAbility","controller":"You"}"#).unwrap();
+        assert_eq!(
+            filter,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&filter).unwrap(),
+            r#"{"type":"StackAbility","controller":"You"}"#
+        );
     }
 
     #[test]

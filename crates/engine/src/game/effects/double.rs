@@ -296,6 +296,8 @@ mod tests {
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
             repeat_for: None,
+            min_x_value: 0,
+            cant_be_copied: false,
             forward_result: false,
             unless_pay: None,
             distribution: None,

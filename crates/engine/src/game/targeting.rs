@@ -1,6 +1,8 @@
-use crate::types::ability::{FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypedFilter};
+use crate::types::ability::{
+    ControllerRef, FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{HexproofFilter, Keyword};
 use crate::types::player::PlayerId;
@@ -17,14 +19,7 @@ pub fn find_legal_targets(
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
-    use crate::types::ability::ControllerRef;
     let mut targets = Vec::new();
-
-    // StackAbility: only match non-mana activated/triggered abilities on the stack
-    if matches!(filter, TargetFilter::StackAbility) {
-        add_stack_abilities(state, source_id, &mut targets);
-        return targets;
-    }
 
     // SpecificObject is runtime-bound (not used for target selection)
     if matches!(filter, TargetFilter::SpecificObject { .. }) {
@@ -37,13 +32,6 @@ pub fn find_legal_targets(
         return targets;
     }
 
-    if matches!(filter, TargetFilter::AttachedTo) {
-        if let Some(target) = resolve_event_context_target(state, filter, source_id) {
-            targets.push(target);
-        }
-        return targets;
-    }
-
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
@@ -52,6 +40,19 @@ pub fn find_legal_targets(
                     targets.push(target);
                 }
             }
+        }
+        return targets;
+    }
+
+    // StackAbility: only match non-mana activated/triggered abilities on the stack.
+    if filter_targets_stack_abilities(filter) {
+        add_stack_abilities(state, filter, source_controller, source_id, &mut targets);
+        return targets;
+    }
+
+    if matches!(filter, TargetFilter::AttachedTo) {
+        if let Some(target) = resolve_event_context_target(state, filter, source_id) {
+            targets.push(target);
         }
         return targets;
     }
@@ -641,23 +642,92 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
 /// Find activated/triggered (non-mana) abilities on the stack as legal targets.
 /// Mana abilities never go on the stack, so all ActivatedAbility/TriggeredAbility
 /// entries are valid. Excludes the source ability itself.
-fn add_stack_abilities(state: &GameState, source_id: ObjectId, targets: &mut Vec<TargetRef>) {
-    use crate::types::game_state::StackEntryKind;
+fn add_stack_abilities(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    targets: &mut Vec<TargetRef>,
+) {
     for entry in &state.stack {
         if entry.id == source_id {
             continue; // Don't target yourself
         }
-        match &entry.kind {
-            // CR 113.3b: Activated keyword abilities (Crew / Station / Equip / Saddle)
-            // are activated abilities and are targetable by counterspell-class effects
-            // that filter "activated or triggered ability on the stack".
-            StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. } => {
-                targets.push(TargetRef::Object(entry.id));
-            }
-            StackEntryKind::Spell { .. } => {}
+        if stack_ability_matches_filter(entry, filter, source_controller) {
+            targets.push(TargetRef::Object(entry.id));
         }
+    }
+}
+
+fn stack_ability_matches_filter(
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+) -> bool {
+    match filter {
+        TargetFilter::StackAbility { controller } => {
+            if !matches!(
+                &entry.kind,
+                // CR 113.3b / CR 113.3c: Activated and triggered abilities are
+                // objects on the stack. Mana abilities do not reach the stack, so
+                // entries of these kinds are targetable stack abilities.
+                StackEntryKind::ActivatedAbility { .. }
+                    | StackEntryKind::TriggeredAbility { .. }
+                    | StackEntryKind::KeywordAction { .. }
+            ) {
+                return false;
+            }
+            stack_entry_controller_matches(entry, controller.as_ref(), source_controller)
+        }
+        TargetFilter::Typed(tf) => {
+            if !tf.type_filters.is_empty()
+                && !tf
+                    .type_filters
+                    .iter()
+                    .all(|ty| matches!(ty, TypeFilter::Card))
+            {
+                return false;
+            }
+            if tf.controller.is_some()
+                && !stack_entry_controller_matches(entry, tf.controller.as_ref(), source_controller)
+            {
+                return false;
+            }
+            tf.properties.iter().all(|property| match property {
+                FilterProp::HasSingleTarget => entry
+                    .ability()
+                    .is_some_and(|ability| ability.targets.len() == 1),
+                FilterProp::InZone { zone } => *zone == Zone::Stack,
+                _ => true,
+            })
+        }
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| stack_ability_matches_filter(entry, filter, source_controller)),
+        TargetFilter::Not { filter } => {
+            !stack_ability_matches_filter(entry, filter, source_controller)
+        }
+        TargetFilter::Any => true,
+        _ => false,
+    }
+}
+
+fn stack_entry_controller_matches(
+    entry: &StackEntry,
+    controller: Option<&ControllerRef>,
+    source_controller: PlayerId,
+) -> bool {
+    let Some(controller) = controller else {
+        return true;
+    };
+    let is_you = entry.controller == source_controller;
+    match controller {
+        ControllerRef::You => is_you,
+        ControllerRef::Opponent => !is_you,
+        _ => false,
     }
 }
 
@@ -781,7 +851,6 @@ fn filter_requires_single_target(filter: &TargetFilter) -> bool {
 }
 
 fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
-    use crate::types::ability::TypeFilter;
     match filter {
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -797,6 +866,17 @@ fn filter_targets_stack_spells(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_targets_stack_spells)
         }
         TargetFilter::Not { filter } => filter_targets_stack_spells(filter),
+        _ => false,
+    }
+}
+
+fn filter_targets_stack_abilities(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackAbility { .. } => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_targets_stack_abilities)
+        }
+        TargetFilter::Not { filter } => filter_targets_stack_abilities(filter),
         _ => false,
     }
 }

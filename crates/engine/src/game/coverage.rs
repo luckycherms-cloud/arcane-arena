@@ -291,7 +291,16 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::SourceOrPaired => "source or paired creature".into(),
-        TargetFilter::StackAbility => "ability on stack".into(),
+        TargetFilter::StackAbility { controller: None } => "ability on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(ControllerRef::You),
+        } => "ability you control on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(ControllerRef::Opponent),
+        } => "ability opponent controls on stack".into(),
+        TargetFilter::StackAbility {
+            controller: Some(controller),
+        } => format!("ability scoped to {controller:?} on stack"),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),

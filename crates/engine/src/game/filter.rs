@@ -582,7 +582,7 @@ fn filter_inner_for_object(
             )
         }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
-        TargetFilter::StackAbility | TargetFilter::StackSpell => false,
+        TargetFilter::StackAbility { .. } | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
@@ -872,7 +872,7 @@ fn zone_change_filter_inner(
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
     }
@@ -1067,7 +1067,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
@@ -1273,7 +1273,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility
+        | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }

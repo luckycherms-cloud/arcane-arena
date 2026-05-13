@@ -5259,7 +5259,7 @@ fn try_parse_verb_and_target<'a>(
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability")
             || abilities_head(rest_lower).is_ok()
         {
-            TargetFilter::StackAbility
+            imperative::stack_ability_filter_from_text(rest_lower)
         } else if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
@@ -5285,7 +5285,7 @@ fn try_parse_verb_and_target<'a>(
             // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
             // preserve the compound-detection contract.
-            TargetFilter::StackAbility
+            imperative::stack_ability_filter_from_text(rest_lower)
         } else if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
         } else {
@@ -14010,12 +14010,15 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     {
         // Both spells and abilities on the stack
         TargetFilter::Or {
-            filters: vec![TargetFilter::StackSpell, TargetFilter::StackAbility],
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::StackAbility { controller: None },
+            ],
         }
     } else if scan_contains_phrase(spell_phrase_clean, "activated or triggered ability")
         || scan_contains_phrase(spell_phrase_clean, "activated ability")
     {
-        TargetFilter::StackAbility
+        TargetFilter::StackAbility { controller: None }
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
         // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
         let (parsed, _) = parse_target(spell_phrase_clean);
@@ -16613,8 +16616,7 @@ mod tests {
 
     /// "Counter all abilities your opponents control" (Kadena's Silencer
     /// trigger body) — bare "abilities" with the mass precheck routes to
-    /// `TargetFilter::StackAbility`. (Controller scoping on stack abilities
-    /// is a separate filter-extension follow-up — see resolver doc.)
+    /// a stack-ability filter scoped to opponents.
     #[test]
     fn effect_counter_all_abilities_kadena() {
         let e = parse_effect("Counter all abilities your opponents control");
@@ -16622,7 +16624,9 @@ mod tests {
             matches!(
                 e,
                 Effect::CounterAll {
-                    target: TargetFilter::StackAbility,
+                    target: TargetFilter::StackAbility {
+                        controller: Some(ControllerRef::Opponent)
+                    },
                 }
             ),
             "expected CounterAll {{ StackAbility }}, got {e:?}"
@@ -16660,7 +16664,7 @@ mod tests {
             matches!(
                 e,
                 Effect::Counter {
-                    target: TargetFilter::StackAbility,
+                    target: TargetFilter::StackAbility { controller: None },
                     ..
                 }
             ),
@@ -17016,6 +17020,29 @@ mod tests {
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::CommanderCastFromCommandZoneCount
             })
+        ));
+    }
+
+    #[test]
+    fn effect_copy_target_controlled_activated_or_triggered_ability_x_times() {
+        let def = parse_effect_chain(
+            "Copy target activated or triggered ability you control X times",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable { ref name }
+            }) if name == "X"
+        ));
+        let Effect::CopySpell { target } = &*def.effect else {
+            panic!("expected CopySpell, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::StackAbility {
+                controller: Some(ControllerRef::You)
+            }
         ));
     }
 

@@ -58,6 +58,8 @@ pub fn build_resolved_from_def_with_targets(
     resolved.multi_target = def.multi_target.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
+    resolved.min_x_value = def.min_x_value;
+    resolved.cant_be_copied = def.cant_be_copied;
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
@@ -84,8 +86,8 @@ pub fn build_resolved_from_def_with_targets(
 ///
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
-/// target_choice_timing, description, repeat_for, forward_result, unless_pay,
-/// distribution, target_selection_mode.
+/// target_choice_timing, description, repeat_for, min_x_value, forward_result,
+/// unless_pay, distribution, target_selection_mode.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, targets, chosen_x, cost_paid_object,
@@ -121,6 +123,7 @@ pub(crate) fn apply_instead_swap(
     overridden.target_choice_timing = sub.target_choice_timing;
     overridden.description = sub.description.clone();
     overridden.repeat_for = sub.repeat_for.clone();
+    overridden.min_x_value = sub.min_x_value;
     overridden.forward_result = sub.forward_result;
     overridden.unless_pay = sub.unless_pay.clone();
     overridden.distribution = sub.distribution.clone();

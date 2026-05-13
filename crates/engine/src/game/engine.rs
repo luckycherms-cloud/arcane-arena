@@ -2054,12 +2054,19 @@ fn apply_action(
         (
             WaitingFor::ChooseXValue {
                 player,
+                min,
                 max,
                 convoke_mode,
                 ..
             },
             GameAction::ChooseX { value },
         ) => {
+            if value < *min {
+                return Err(EngineError::InvalidAction(format!(
+                    "X={value} is below the minimum legal value of {min}",
+                    min = *min,
+                )));
+            }
             if value > *max {
                 return Err(EngineError::InvalidAction(format!(
                     "X={value} exceeds the maximum legal value of {max}",

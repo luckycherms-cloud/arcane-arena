@@ -639,6 +639,7 @@ mod tests {
         let pending = dummy_pending_cast(ObjectId(20), CardId(2), PlayerId(0));
         state.waiting_for = WaitingFor::ChooseXValue {
             player: PlayerId(0),
+            min: 0,
             max: 5,
             pending_cast: pending.clone(),
             convoke_mode: None,

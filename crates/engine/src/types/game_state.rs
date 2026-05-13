@@ -1084,11 +1084,15 @@ pub enum WaitingFor {
     /// whose cost contains `ManaCostShard::X`. Fires after target selection and
     /// before `ManaPayment`. `max` is the engine-computed upper bound for UI
     /// display and AI enumeration (see `casting_costs::max_x_value`).
+    /// `min` defaults to zero and is raised by parser-stamped restrictions such
+    /// as "X can't be 0."
     /// `convoke_mode` passes through to the subsequent `ManaPayment` step.
     /// `pending_cast` is embedded so filtered state snapshots (multiplayer)
     /// still carry enough context for the UI to render the spell name/cost.
     ChooseXValue {
         player: PlayerId,
+        #[serde(default)]
+        min: u32,
         max: u32,
         pending_cast: Box<PendingCast>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4319,6 +4323,7 @@ mod tests {
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),
+            min: 0,
             max: 5,
             pending_cast: pending,
             convoke_mode: None,

@@ -3186,10 +3186,20 @@ pub fn enter_payment_step(
 ) -> Result<WaitingFor, EngineError> {
     if let Some(pending) = state.pending_cast.as_ref() {
         if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
+            let min = pending.ability.min_x_value;
             let max = max_x_value(state, player, &pending.cost);
+            if min > max {
+                let pending_for_cancel = pending.clone();
+                state.pending_cast = None;
+                super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Minimum legal X value {min} exceeds maximum payable X value {max}"
+                )));
+            }
             let pending_cast = pending.clone();
             return Ok(WaitingFor::ChooseXValue {
                 player,
+                min,
                 max,
                 pending_cast,
                 convoke_mode,

@@ -733,7 +733,10 @@ export type WaitingFor =
       data: { pending: { player: PlayerId; count: number }[] };
     }
   | { type: "ManaPayment"; data: { player: PlayerId } }
-  | { type: "ChooseXValue"; data: { player: PlayerId; max: number; pending_cast: PendingCast } }
+  | {
+      type: "ChooseXValue";
+      data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
+    }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
