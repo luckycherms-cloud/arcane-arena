@@ -31,9 +31,10 @@ use super::oracle_util::{
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
-    ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, OriginConstraint,
+    PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -2947,12 +2948,35 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
     let mut search_start = 0;
     while let Ok((_, (before, after))) = split_once_on(&lower[search_start..], ", ") {
         let comma_pos = search_start + before.len();
-        if !continues_player_action_list(after) {
+        if !continues_player_action_list(after)
+            && !continues_disjunctive_zone_change_condition(after)
+        {
             return Some(comma_pos);
         }
         search_start = comma_pos + 2;
     }
     None
+}
+
+/// CR 603.1 + CR 603.2: Parser-as-detector — returns `true` when the text after
+/// a `, ` boundary is another clause of a disjunctive zone-change trigger
+/// condition ("..., or a creature card leaves your graveyard, ..."), meaning the
+/// comma is a condition continuation rather than the effect boundary.
+fn continues_disjunctive_zone_change_condition(after_comma: &str) -> bool {
+    let trimmed = after_comma.trim_start();
+    // A disjunctive continuation always begins with the "or " connector.
+    let Ok((after_or, ())) = value((), tag::<_, _, OracleError<'_>>("or ")).parse(trimmed) else {
+        return false;
+    };
+    // Examine only the single clause segment up to the next ", " — beyond that
+    // lies either the next clause (handled on its own boundary) or the effect.
+    let clause = match nom_primitives::split_once_on(after_or, ", ") {
+        Ok((_, (before, _))) => before,
+        Err(_) => after_or,
+    };
+    let mut ctx = ParseContext::default();
+    let (subject, verb) = parse_trigger_subject(clause.trim(), &mut ctx);
+    parse_zone_change_clause(&subject, verb).is_some()
 }
 
 fn continues_player_action_list(after_comma: &str) -> bool {
@@ -3054,6 +3078,17 @@ pub(crate) fn parse_trigger_condition(
     // ordinal counter phrases don't emit a degraded-subject diagnostic first.
     if let Some(result) = try_parse_counter_trigger(&lower) {
         return result;
+    }
+
+    // CR 603.1 + CR 603.2: Disjunctive zone-change trigger — a single triggered
+    // ability whose trigger event is a disjunction of distinct zone-change
+    // shapes ("whenever [clause], or [clause], or [clause]"). Must precede
+    // subject decomposition / `try_parse_event`, which only handle one clause.
+    if let Some(clauses) = parse_disjunctive_zone_change_condition(condition) {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.zone_change_clauses = clauses;
+        return (TriggerMode::ChangesZone, def);
     }
 
     // --- Subject + event decomposition ---
@@ -6152,6 +6187,148 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// trigger fired for any card going to any graveyard. `valid_target` is also
 /// preserved so downstream effect resolution (e.g. `target: ParentTarget`) keeps
 /// the narrowed scope.
+/// CR 603.6c: Parse the source-zone tail of a "put into a graveyard" clause.
+/// Handles "from the battlefield" → `Equals`, "from anywhere other than the
+/// battlefield" → `NotEquals`, "from anywhere" / no clause → `Any`, and the
+/// possessive-zone forms reused from `parse_graveyard_origin_zone`.
+fn parse_put_into_graveyard_origin(input: &str) -> OracleResult<'_, OriginConstraint> {
+    let input = input.trim_start();
+    // No "from" clause — any source zone.
+    let Ok((after_from, ())) = value((), tag::<_, _, OracleError<'_>>("from ")).parse(input) else {
+        return Ok((input, OriginConstraint::Any));
+    };
+    let after_from = after_from.trim_start();
+    // CR 603.6c: "from anywhere other than the battlefield" — the
+    // never-a-leaves-the-battlefield-ability form (Syr Konrad clause 2).
+    if let Ok((rest, ())) = value(
+        (),
+        tag::<_, _, OracleError<'_>>("anywhere other than the battlefield"),
+    )
+    .parse(after_from)
+    {
+        return Ok((rest, OriginConstraint::NotEquals(Zone::Battlefield)));
+    }
+    // Reuse the shared origin-zone combinator for "the battlefield" / "anywhere"
+    // / possessive library/hand forms.
+    let (rest, zone) = parse_graveyard_origin_zone.parse(after_from)?;
+    Ok((
+        rest,
+        match zone {
+            Some(z) => OriginConstraint::Equals(z),
+            None => OriginConstraint::Any,
+        },
+    ))
+}
+
+/// CR 603.6 + CR 603.2: Parse one clause of a disjunctive zone-change trigger
+/// from `[subject] [verb-phrase]`. Returns the typed `ZoneChangeClause`, or
+/// `None` if the verb phrase is not a recognized zone-change shape.
+fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneChangeClause> {
+    let rest = rest.trim_start();
+
+    // CR 700.4: "dies" / "is put into a graveyard from the battlefield" —
+    // battlefield → graveyard.
+    if let Ok((tail, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("dies")),
+        value((), tag("die")),
+        value((), tag("is put into a graveyard from the battlefield")),
+        value((), tag("are put into a graveyard from the battlefield")),
+    ))
+    .parse(rest)
+    {
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        return Some(ZoneChangeClause {
+            origin: OriginConstraint::Equals(Zone::Battlefield),
+            destination: Some(Zone::Graveyard),
+            valid_card: Some(subject.clone()),
+        });
+    }
+
+    // CR 603.6c: "is/are put into [a] graveyard [from <zone>]" — the general
+    // put-into-graveyard form. Source-zone constraint comes from the optional
+    // "from" tail.
+    if let Ok((after_verb, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("is put into ")),
+        value((), tag("are put into ")),
+    ))
+    .parse(rest)
+    {
+        let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
+        let (tail, origin) = parse_put_into_graveyard_origin(after_gy).ok()?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        let valid_card = match possessive {
+            Some(ctrl) => Some(add_controller(subject.clone(), ctrl)),
+            None => Some(subject.clone()),
+        };
+        return Some(ZoneChangeClause {
+            origin,
+            destination: Some(Zone::Graveyard),
+            valid_card,
+        });
+    }
+
+    // CR 603.10a: "leaves your graveyard" — a leaves-a-graveyard look-back
+    // trigger. The destination is unconstrained (the card may go to any zone).
+    // CR 603.10a + CR 400.1: "your graveyard" narrows the card to one in the
+    // controller's graveyard via `ControllerRef::You` on the card filter.
+    if let Ok((tail, ())) =
+        value((), tag::<_, _, OracleError<'_>>("leaves your graveyard")).parse(rest)
+    {
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        return Some(ZoneChangeClause {
+            origin: OriginConstraint::Equals(Zone::Graveyard),
+            destination: None,
+            valid_card: Some(add_controller(subject.clone(), ControllerRef::You)),
+        });
+    }
+
+    None
+}
+
+/// CR 603.1 + CR 603.2: Decompose a disjunctive zone-change trigger condition
+/// ("whenever [clause], or [clause], or [clause]") into a `Vec<ZoneChangeClause>`.
+/// Returns `None` unless there are two or more clauses and EVERY clause parses —
+/// a single-clause condition stays on the scalar path, and a partial parse falls
+/// back to `Unknown` rather than dropping clauses.
+fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneChangeClause>> {
+    let lower = condition.to_lowercase();
+    let after_keyword = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
+
+    // Split on the disjunction separator. Each clause is "[subject] [verb]".
+    let mut clauses = Vec::new();
+    let mut remaining = after_keyword;
+    loop {
+        // Find the next ", or " / " or " boundary, splitting off one clause.
+        let (clause_text, rest) = match nom_primitives::split_once_on(remaining, ", or ")
+            .or_else(|_| nom_primitives::split_once_on(remaining, " or "))
+        {
+            Ok((_, (before, after))) => (before, Some(after)),
+            Err(_) => (remaining, None),
+        };
+        let mut ctx = ParseContext::default();
+        let (subject, verb) = parse_trigger_subject(clause_text.trim(), &mut ctx);
+        clauses.push(parse_zone_change_clause(&subject, verb)?);
+        match rest {
+            Some(after) => remaining = after,
+            None => break,
+        }
+    }
+
+    (clauses.len() >= 2).then_some(clauses)
+}
+
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -6915,6 +7092,78 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
+    }
+
+    // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
+    // trigger. Asserts the parsed `TriggerDefinition` SHAPE; it does not drive
+    // the runtime apply pipeline (see `triggers.rs` for the runtime test).
+    #[test]
+    fn parse_syr_konrad_disjunctive_zone_change() {
+        let def = parse_trigger_line(
+            "Whenever another creature dies, or a creature card is put into a graveyard \
+             from anywhere other than the battlefield, or a creature card leaves your \
+             graveyard, Syr Konrad, the Grim deals 1 damage to each opponent.",
+            "Syr Konrad, the Grim",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(
+            def.zone_change_clauses.len(),
+            3,
+            "expected 3 disjunctive clauses, got {:?}",
+            def.zone_change_clauses
+        );
+
+        // Clause 1: another creature dies (battlefield -> graveyard).
+        let c1 = &def.zone_change_clauses[0];
+        assert_eq!(c1.origin, OriginConstraint::Equals(Zone::Battlefield));
+        assert_eq!(c1.destination, Some(Zone::Graveyard));
+        let TargetFilter::Typed(tf1) = c1.valid_card.as_ref().expect("clause 1 valid_card") else {
+            panic!("clause 1 valid_card not Typed: {:?}", c1.valid_card);
+        };
+        assert!(tf1.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf1.properties.contains(&FilterProp::Another));
+
+        // Clause 2: creature card put into graveyard from anywhere but battlefield.
+        let c2 = &def.zone_change_clauses[1];
+        assert_eq!(c2.origin, OriginConstraint::NotEquals(Zone::Battlefield));
+        assert_eq!(c2.destination, Some(Zone::Graveyard));
+        assert!(c2.valid_card.is_some());
+
+        // Clause 3: creature card leaves your graveyard (any destination).
+        let c3 = &def.zone_change_clauses[2];
+        assert_eq!(c3.origin, OriginConstraint::Equals(Zone::Graveyard));
+        assert_eq!(c3.destination, None);
+        let TargetFilter::Typed(tf3) = c3.valid_card.as_ref().expect("clause 3 valid_card") else {
+            panic!("clause 3 valid_card not Typed: {:?}", c3.valid_card);
+        };
+        assert_eq!(tf3.controller, Some(ControllerRef::You));
+
+        // The effect must be DamageEachPlayer — no Unimplemented leakage.
+        let execute = def.execute.as_ref().expect("execute ability");
+        fn has_damage_each_player(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::DamageEachPlayer { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_damage_each_player(s))
+        }
+        fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+            matches!(*ability.effect, Effect::Unimplemented { .. })
+                || ability
+                    .sub_ability
+                    .as_ref()
+                    .is_some_and(|s| has_unimplemented(s))
+        }
+        assert!(
+            has_damage_each_player(execute),
+            "expected DamageEachPlayer effect, got {:?}",
+            execute.effect
+        );
+        assert!(
+            !has_unimplemented(execute),
+            "effect chain leaked Unimplemented: {:?}",
+            execute
+        );
     }
 
     // CR 603.6a + CR 611.2b: "When this land enters untapped, ..." — Gingerbread

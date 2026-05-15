@@ -8169,6 +8169,40 @@ pub enum TriggerConstraint {
     MaxTimesPerTurn { max: u32 },
 }
 
+/// CR 603.6c: source-zone constraint for one clause of a zone-change trigger.
+/// CR 400.1 enumerates the seven zones; a zone-change event's `from` field is
+/// `Some(zone)` for an object that moved between zones and `None` for an object
+/// created directly in its destination (CR 111.1 token creation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum OriginConstraint {
+    /// No source-zone restriction. Matches any `from`, including `None`.
+    Any,
+    /// Matches only when the object moved from exactly this zone.
+    Equals(Zone),
+    /// "from anywhere other than the battlefield" — matches any source zone
+    /// except this one. An object with `from = None` does not match.
+    NotEquals(Zone),
+    /// Matches when the source zone is one of these. Subsumes inclusion sets.
+    OneOf(Vec<Zone>),
+}
+
+/// CR 603.6 + CR 603.2: one clause of a disjunctive zone-change trigger.
+/// A zone-change event satisfies the trigger if it matches ANY clause
+/// (CR 603.2 — a game event matching the trigger condition fires the ability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneChangeClause {
+    /// CR 603.6c: the source-zone constraint for this clause.
+    pub origin: OriginConstraint,
+    /// The required destination zone, or `None` for "leaves [zone]" triggers
+    /// (CR 603.10a) where the destination is unconstrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<Zone>,
+    /// Filter the moved card must satisfy for this clause to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_card: Option<TargetFilter>,
+}
+
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
 /// When set, the trigger only matches events for the specified counter type,
 /// optionally requiring that the count crosses a threshold.
@@ -8199,6 +8233,16 @@ pub struct TriggerDefinition {
     /// (and `origin` is ignored). Leave empty for single-zone triggers that use `origin`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub origin_zones: Vec<Zone>,
+    /// CR 603.6 + CR 603.2: Disjunctive zone-change clauses. A single triggered
+    /// ability (CR 603.1) whose trigger event is a disjunction of distinct
+    /// zone-change shapes (e.g. Syr Konrad: "another creature dies, OR a creature
+    /// card is put into a graveyard from anywhere other than the battlefield, OR
+    /// a creature card leaves your graveyard"). When non-empty, the matcher fires
+    /// if the event matches ANY clause and the scalar
+    /// `origin`/`origin_zones`/`destination`/`valid_card` fields are ignored.
+    /// Leave empty for single-clause triggers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zone_change_clauses: Vec<ZoneChangeClause>,
     #[serde(default)]
     pub destination: Option<Zone>,
     #[serde(default)]
@@ -8250,6 +8294,7 @@ impl TriggerDefinition {
             valid_card: None,
             origin: None,
             origin_zones: vec![],
+            zone_change_clauses: vec![],
             destination: None,
             trigger_zones: vec![],
             phase: None,
@@ -8347,6 +8392,11 @@ impl TriggerDefinition {
 
     pub fn player_actions(mut self, actions: Vec<PlayerActionKind>) -> Self {
         self.player_actions = Some(actions);
+        self
+    }
+
+    pub fn zone_change_clauses(mut self, clauses: Vec<ZoneChangeClause>) -> Self {
+        self.zone_change_clauses = clauses;
         self
     }
 }
@@ -9834,6 +9884,7 @@ mod tests {
             valid_card: Some(TargetFilter::SelfRef),
             origin: Some(Zone::Battlefield),
             origin_zones: vec![],
+            zone_change_clauses: vec![],
             destination: Some(Zone::Graveyard),
             trigger_zones: vec![Zone::Battlefield],
             phase: None,

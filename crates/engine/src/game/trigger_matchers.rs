@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
-    TypedFilter,
+    ControllerRef, DamageKindFilter, EffectKind, OriginConstraint, TargetFilter, TargetRef,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -570,6 +570,52 @@ pub(super) fn target_filter_matches_object(
 // Core Trigger Matchers (~20 with real logic)
 // ---------------------------------------------------------------------------
 
+/// CR 603.6 + CR 603.6c: Tests whether one zone-change event satisfies a single
+/// origin/destination/valid_card clause. Shared by both the scalar
+/// `match_changes_zone` path and the disjunctive `zone_change_clauses` path.
+#[allow(clippy::too_many_arguments)]
+fn zone_change_clause_matches(
+    origin: &OriginConstraint,
+    destination: Option<&Zone>,
+    valid_card: Option<&TargetFilter>,
+    from: &Option<Zone>,
+    to: &Zone,
+    record: &crate::types::game_state::ZoneChangeRecord,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    // CR 603.6c + CR 111.1: A zone-change event's `from` is `None` when the
+    // object was created directly in `to` (token creation / emblem). Any
+    // constraint that names a specific source zone cannot match such an event;
+    // `OriginConstraint::Any` matches regardless.
+    let origin_ok = match origin {
+        OriginConstraint::Any => true,
+        OriginConstraint::Equals(z) => from == &Some(*z),
+        OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
+        OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+    };
+    if !origin_ok {
+        return false;
+    }
+    if let Some(dest) = destination {
+        if dest != to {
+            return false;
+        }
+    }
+    if let Some(filter) = valid_card {
+        let ctx = super::filter::FilterContext::from_source(state, source_id);
+        let matches = if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
+            super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
+        } else {
+            super::filter::matches_target_filter_on_zone_change_record(state, record, filter, &ctx)
+        };
+        if !matches {
+            return false;
+        }
+    }
+    true
+}
+
 // CR 603.6: ZoneChange triggers when an object enters or leaves a zone.
 pub(super) fn match_changes_zone(
     event: &GameEvent,
@@ -584,56 +630,46 @@ pub(super) fn match_changes_zone(
         record,
     } = event
     {
-        // CR 603.10a: Check origin zone(s). Disjunctive `origin_zones` takes
-        // precedence over single-zone `origin` when non-empty — this supports
-        // "put into exile from your library and/or your graveyard" where the
-        // source zone can be one of several zones.
-        //
-        // CR 111.1 + CR 603.6a: `from = None` means the object was created
-        // directly in `to` (token creation / emblem). Any trigger that names
-        // a specific origin zone cannot match such an event; a trigger with
-        // no origin filter (e.g. Elvish Vanguard's "whenever another Elf
-        // enters") falls through these guards and matches.
-        match from {
-            Some(from_zone) => {
-                if !trigger.origin_zones.is_empty() {
-                    if !trigger.origin_zones.contains(from_zone) {
-                        return false;
-                    }
-                } else if let Some(origin) = &trigger.origin {
-                    if origin != from_zone {
-                        return false;
-                    }
-                }
-            }
-            None => {
-                if !trigger.origin_zones.is_empty() || trigger.origin.is_some() {
-                    return false;
-                }
-            }
+        // CR 603.2: A disjunctive zone-change trigger fires if the event matches
+        // ANY of its clauses. When `zone_change_clauses` is non-empty it fully
+        // supersedes the scalar `origin`/`origin_zones`/`destination`/`valid_card`
+        // path (Syr Konrad's three-way "dies / put into graveyard / leaves
+        // graveyard" disjunction).
+        if !trigger.zone_change_clauses.is_empty() {
+            return trigger.zone_change_clauses.iter().any(|clause| {
+                zone_change_clause_matches(
+                    &clause.origin,
+                    clause.destination.as_ref(),
+                    clause.valid_card.as_ref(),
+                    from,
+                    to,
+                    record,
+                    source_id,
+                    state,
+                )
+            });
         }
-        // Check destination zone using typed field
-        if let Some(destination) = &trigger.destination {
-            if destination != to {
-                return false;
-            }
-        }
-        // Check valid_card filter
-        if let Some(filter) = &trigger.valid_card {
-            let ctx = super::filter::FilterContext::from_source(state, source_id);
-            let matches =
-                if *to == Zone::Battlefield && state.objects.contains_key(&record.object_id) {
-                    super::filter::matches_target_filter(state, record.object_id, filter, &ctx)
-                } else {
-                    super::filter::matches_target_filter_on_zone_change_record(
-                        state, record, filter, &ctx,
-                    )
-                };
-            if !matches {
-                return false;
-            }
-        }
-        true
+        // Scalar single-clause path. CR 603.10a: `origin_zones` is a disjunctive
+        // source-zone set that takes precedence over single-zone `origin` when
+        // non-empty. CR 111.1: `from = None` (token creation) cannot satisfy a
+        // trigger that names any specific origin zone.
+        let origin = if !trigger.origin_zones.is_empty() {
+            OriginConstraint::OneOf(trigger.origin_zones.clone())
+        } else if let Some(origin) = trigger.origin {
+            OriginConstraint::Equals(origin)
+        } else {
+            OriginConstraint::Any
+        };
+        zone_change_clause_matches(
+            &origin,
+            trigger.destination.as_ref(),
+            trigger.valid_card.as_ref(),
+            from,
+            to,
+            record,
+            source_id,
+            state,
+        )
     } else {
         false
     }
@@ -2738,6 +2774,99 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn match_changes_zone_disjunctive() {
+        use crate::types::ability::{OriginConstraint, ZoneChangeClause};
+
+        let state = setup();
+        let mut trigger = make_trigger(TriggerMode::ChangesZone);
+        // CR 603.6: Syr Konrad's three-clause disjunction.
+        trigger.zone_change_clauses = vec![
+            // Clause 1: another creature dies (battlefield -> graveyard).
+            ZoneChangeClause {
+                origin: OriginConstraint::Equals(Zone::Battlefield),
+                destination: Some(Zone::Graveyard),
+                valid_card: None,
+            },
+            // Clause 2: a creature card put into a graveyard from anywhere
+            // other than the battlefield.
+            ZoneChangeClause {
+                origin: OriginConstraint::NotEquals(Zone::Battlefield),
+                destination: Some(Zone::Graveyard),
+                valid_card: None,
+            },
+            // Clause 3: a creature card leaves the graveyard (any destination).
+            ZoneChangeClause {
+                origin: OriginConstraint::Equals(Zone::Graveyard),
+                destination: None,
+                valid_card: None,
+            },
+        ];
+
+        // Clause 1: dies in combat.
+        let dies = zone_changed_event(
+            ObjectId(5),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(&dies, &trigger, ObjectId(1), &state));
+
+        // Clause 2: milled from library into graveyard.
+        let milled = zone_changed_event(
+            ObjectId(6),
+            Zone::Library,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(&milled, &trigger, ObjectId(1), &state));
+
+        // Clause 3: creature card leaves the graveyard for the hand.
+        let leaves_graveyard = zone_changed_event(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Hand,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(match_changes_zone(
+            &leaves_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
+
+        // Matches no clause: a creature enters the battlefield from hand.
+        let etb = zone_changed_event(
+            ObjectId(8),
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+        assert!(!match_changes_zone(&etb, &trigger, ObjectId(1), &state));
+
+        // Implicit `from = None` guard: a token created directly in the
+        // graveyard must NOT satisfy clause 2's `NotEquals(Battlefield)`.
+        let created_in_graveyard = GameEvent::ZoneChanged {
+            object_id: ObjectId(9),
+            from: None,
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                ..ZoneChangeRecord::test_minimal(ObjectId(9), None, Zone::Graveyard)
+            }),
+        };
+        assert!(!match_changes_zone(
+            &created_in_graveyard,
+            &trigger,
+            ObjectId(1),
+            &state
+        ));
     }
 
     #[test]

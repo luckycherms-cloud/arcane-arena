@@ -10273,6 +10273,159 @@ pub mod tests {
             "Prankster B should be 2/1 after receiving +1/+0 from A's trigger"
         );
     }
+
+    /// RUNTIME TEST — issue #411. Drives Syr Konrad's `{1}{B}: Each player mills
+    /// a card.` activated ability through the real `apply` pipeline four times.
+    /// Both libraries are stacked deterministically: the controller's library
+    /// holds only lands (zero clause-2 triggers from the controller's own mill),
+    /// the opponent's library holds three creature cards plus one noncreature.
+    /// CR 603.2c: each milled creature card is a distinct zone-change event, so
+    /// the disjunctive trigger fires once per milled creature. Exactly three
+    /// triggers fire (the opponent's three creatures), each dealing 1 damage to
+    /// each opponent — the controller's lands and the noncreature contribute zero.
+    #[test]
+    fn test_syr_konrad_disjunctive_trigger_fires_per_milled_creature() {
+        use crate::game::scenario::GameScenario;
+
+        const KONRAD_ORACLE: &str = "Whenever another creature dies, or a creature card \
+            is put into a graveyard from anywhere other than the battlefield, or a \
+            creature card leaves your graveyard, Syr Konrad, the Grim deals 1 damage \
+            to each opponent.\n{1}{B}: Each player mills a card.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let konrad = scenario
+            .add_creature_from_oracle(PlayerId(0), "Syr Konrad, the Grim", 5, 4, KONRAD_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+
+        // Arrange both decks. `mill` removes `library[0..count]`, so the cards
+        // listed here (front-of-vector first) are milled in order across the
+        // four activations. This is test arrangement, not trigger faking.
+        let p1_start_life = runner.state().players[1].life;
+        stack_library(
+            runner.state_mut(),
+            PlayerId(0),
+            &[
+                CoreType::Land,
+                CoreType::Land,
+                CoreType::Land,
+                CoreType::Land,
+            ],
+        );
+        stack_library(
+            runner.state_mut(),
+            PlayerId(1),
+            &[
+                CoreType::Creature,
+                CoreType::Creature,
+                CoreType::Creature,
+                CoreType::Sorcery,
+            ],
+        );
+
+        // Fund four activations of the {1}{B} cost.
+        {
+            let p0 = runner
+                .state_mut()
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            for _ in 0..4 {
+                p0.mana_pool.add(ManaUnit {
+                    color: ManaType::Colorless,
+                    source_id: ObjectId(0),
+                    snow: false,
+                    source_could_produce_two_or_more_colors: false,
+                    restrictions: Vec::new(),
+                    grants: vec![],
+                    expiry: None,
+                });
+                p0.mana_pool.add(ManaUnit {
+                    color: ManaType::Black,
+                    source_id: ObjectId(0),
+                    snow: false,
+                    source_could_produce_two_or_more_colors: false,
+                    restrictions: Vec::new(),
+                    grants: vec![],
+                    expiry: None,
+                });
+            }
+        }
+
+        for activation in 0..4 {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: konrad,
+                    ability_index: 0,
+                })
+                .unwrap_or_else(|e| panic!("activation {activation} failed: {e:?}"));
+            resolve_stack_to_empty(&mut runner);
+        }
+
+        // Both libraries are fully milled.
+        assert_eq!(runner.state().players[0].library.len(), 0);
+        assert_eq!(runner.state().players[1].library.len(), 0);
+
+        // CR 603.2: exactly three disjunctive triggers fired — one per opponent
+        // creature card milled (clause 2). Each dealt 1 damage to the single
+        // opponent (P1). The controller's four lands and the opponent's lone
+        // noncreature card matched no clause.
+        let p1_life_lost = p1_start_life - runner.state().players[1].life;
+        assert_eq!(
+            p1_life_lost, 3,
+            "expected 3 disjunctive triggers (3 opponent creature mills); \
+             lands and noncreatures must not fire the trigger"
+        );
+    }
+
+    /// Place typed cards onto a player's library. The slice order is
+    /// front-of-vector first, which `Effect::Mill` consumes top-down.
+    fn stack_library(state: &mut GameState, player: PlayerId, core_types: &[CoreType]) {
+        // Clear any starting library so the arrangement is fully deterministic.
+        if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
+            let existing: Vec<_> = p.library.iter().copied().collect();
+            for id in &existing {
+                state.objects.remove(id);
+            }
+            state
+                .players
+                .iter_mut()
+                .find(|p| p.id == player)
+                .unwrap()
+                .library
+                .clear();
+        }
+        for (i, &core_type) in core_types.iter().enumerate() {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                state,
+                card_id,
+                player,
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(core_type);
+            obj.base_card_types = obj.card_types.clone();
+        }
+    }
+
+    /// Pass priority until the stack is empty, bailing on stall.
+    fn resolve_stack_to_empty(runner: &mut crate::game::scenario::GameRunner) {
+        for _ in 0..40 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            if runner.act(GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+    }
 }
 
 /// Regression tests for the foundational trigger double-fire defect
