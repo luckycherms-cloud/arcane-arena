@@ -3,6 +3,7 @@ mod adapter_contract_fixtures;
 mod advanced_reconstruction_regression;
 mod aura_on_player;
 mod betor_lifelink_counters_repro;
+mod brigid_mana_ability;
 mod coalition_relic_integration;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
