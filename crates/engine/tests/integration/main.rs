@@ -44,6 +44,7 @@ mod springheart_nantuko_bestow_landfall;
 mod swans_prevention_followup;
 mod tempt_with_discovery;
 mod timely_ward_regression;
+mod tinybones_joins_up_multi_target;
 mod treasured_find_regression;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
