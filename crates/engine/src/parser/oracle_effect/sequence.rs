@@ -1586,6 +1586,7 @@ pub(super) fn apply_clause_continuation(
             destination,
             enter_tapped: tapped,
             rest_destination: rest_dest,
+            optional_decline,
         } => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -1594,11 +1595,31 @@ pub(super) fn apply_clause_continuation(
                 kept_destination,
                 enter_tapped,
                 rest_destination,
+                kept_optional_to,
                 ..
             } = &mut *previous.effect
             {
-                *kept_destination = destination;
-                *enter_tapped = tapped;
+                match optional_decline {
+                    // CR 701.20a + CR 608.2c: optional kept clause ("you may put
+                    // that card onto the battlefield"). `destination` is the
+                    // accept zone, `decline` the decline zone. `enter_tapped`
+                    // applies to the accept zone (always Battlefield).
+                    Some(decline) => {
+                        *kept_optional_to = Some(destination);
+                        *kept_destination = decline;
+                        *enter_tapped = tapped;
+                    }
+                    // Mandatory kept clause. Refine `kept_destination` without
+                    // clobbering a `kept_optional_to` set by a prior chunk (the
+                    // GAP-1 fix: Songbirds' Blessing's "If you don't, put it into
+                    // your hand" sentence refines the decline zone to Hand).
+                    None => {
+                        *kept_destination = destination;
+                        if destination == Zone::Battlefield {
+                            *enter_tapped = tapped;
+                        }
+                    }
+                }
                 if let Some(rest) = rest_dest {
                     *rest_destination = rest;
                 }
@@ -2372,10 +2393,25 @@ pub(super) fn parse_followup_continuation_ast(
                     (Zone::Hand, false)
                 };
             let rest = parse_reveal_until_rest_zone(&lower);
+            // CR 701.20a + CR 608.2c: "you may put that card onto the battlefield"
+            // makes the kept destination a controller choice. The decline zone is
+            // the explicit "if you don't, put it into your hand" (→ Hand) or the
+            // bottom-of-library rest pile by default (→ Library).
+            let optional = nom_primitives::scan_contains(&lower, "you may put");
+            let optional_decline = if optional {
+                Some(if nom_primitives::scan_contains(&lower, "into your hand") {
+                    Zone::Hand
+                } else {
+                    Zone::Library
+                })
+            } else {
+                None
+            };
             Some(ContinuationAst::RevealUntilKept {
                 destination,
                 enter_tapped,
                 rest_destination: rest,
+                optional_decline,
             })
         }
         // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"

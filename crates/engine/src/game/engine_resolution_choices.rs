@@ -30,6 +30,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         WaitingFor::ScryChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::CascadeChoice { .. }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
@@ -160,6 +161,45 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
+        // the controller routes the kept card after RevealUntil found a hit.
+        // Accept → `accept_zone`; decline → `decline_zone`. On decline, when the
+        // decline zone IS the rest pile, the hit card joins the misses so the
+        // random-order placement covers it in one shuffle (CR 701.20a).
+        (
+            WaitingFor::RevealUntilKeptChoice {
+                player,
+                hit_card,
+                accept_zone,
+                decline_zone,
+                enter_tapped,
+                revealed_misses,
+                rest_destination,
+            },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            let mut misses = revealed_misses;
+            if accept {
+                zones::move_to_zone(state, hit_card, accept_zone, events);
+                // CR 110.5b: the kept card enters tapped when requested.
+                if enter_tapped {
+                    if let Some(obj) = state.objects.get_mut(&hit_card) {
+                        obj.tapped = true;
+                    }
+                }
+            } else if decline_zone == rest_destination {
+                misses.push(hit_card);
+            } else {
+                zones::move_to_zone(state, hit_card, decline_zone, events);
+            }
+            effects::reveal_until::move_rest(state, &misses, rest_destination, events);
+            // CR 701.20b: revealed cards have now moved zones — clear markers.
+            for &card_id in &misses {
+                state.revealed_cards.remove(&card_id);
+            }
+            state.revealed_cards.remove(&hit_card);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (

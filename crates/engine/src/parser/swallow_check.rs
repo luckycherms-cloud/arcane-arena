@@ -370,6 +370,14 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         | Effect::CopySpell {
             retarget: CopyRetargetPermission::MayChooseNewTargets,
             ..
+        }
+        // CR 701.20a + CR 608.2c: RevealUntil with kept_optional_to encodes
+        // "you may put that card onto the battlefield" — the kept-card
+        // destination choice IS the "may" decision (mirrors RevealFromHand
+        // { on_decline }).
+        | Effect::RevealUntil {
+            kept_optional_to: Some(_),
+            ..
         } => true,
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
@@ -1378,6 +1386,10 @@ fn detect_condition_if(
         // Amphitheater) as an effect with an `on_decline` branch.
         "\"mode\":{\"type\":\"Optional\"",
         "\"on_decline\":{",
+        // CR 701.20a + CR 608.2c: RevealUntil's kept_optional_to encodes the
+        // "you may put that card onto the battlefield. If you don't, ..."
+        // decline branch — the "if" is the optional-destination gate.
+        "\"kept_optional_to\":",
         // CR 117.3a: TopOfLibraryCastPermission with `alt_cost` IS the "if
         // you cast a spell this way, pay X" gate (Bolas's Citadel etc.).
         "TopOfLibraryCastPermission",
@@ -2292,6 +2304,30 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    /// CR 701.20a + CR 608.2c: RevealUntil's "you may put that card onto the
+    /// battlefield" is represented as `kept_optional_to: Some(Battlefield)`, so
+    /// neither `Optional_YouMay` nor (for the explicit "if you don't" form)
+    /// `Condition_If` swallowed-clause warnings are emitted. Covers Genesis
+    /// Storm / Hei Bai / Songbirds' Blessing.
+    #[test]
+    fn optional_you_may_accepts_reveal_until_optional_kept() {
+        let hei_bai = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. Then shuffle your library.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&hei_bai, "Optional_YouMay"));
+
+        let songbirds = parse(
+            "Reveal cards from the top of your library until you reveal a creature card. \
+             You may put that card onto the battlefield. If you don't, put it into your hand. \
+             Put the rest on the bottom of your library in a random order.",
+            &["Sorcery"],
+        );
+        assert!(!has_swallowed_detector(&songbirds, "Optional_YouMay"));
+        assert!(!has_swallowed_detector(&songbirds, "Condition_If"));
     }
 
     /// CR 707.10c: Mirrorpool's "you may choose new targets for the copy" is

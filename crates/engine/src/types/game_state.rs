@@ -1975,6 +1975,20 @@ pub enum WaitingFor {
         /// Cards exiled as misses (go to bottom in random order).
         exiled_misses: Vec<ObjectId>,
     },
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — the
+    /// controller chooses the kept card's destination after `RevealUntil` finds a
+    /// hit. Accept → `accept_zone`; decline → `decline_zone`. The misses (and, on
+    /// decline, the hit card when its zone is the rest pile) are moved by the
+    /// choice handler so the random-order shuffle includes the declined card.
+    RevealUntilKeptChoice {
+        player: PlayerId,
+        hit_card: ObjectId,
+        accept_zone: Zone,
+        decline_zone: Zone,
+        enter_tapped: bool,
+        revealed_misses: Vec<ObjectId>,
+        rest_destination: Zone,
+    },
     /// CR 702.85a: Player chooses to cast the cascaded card without paying its
     /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
     /// the bottom of the library in a random order together with the misses
@@ -2413,6 +2427,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
+            | WaitingFor::RevealUntilKeptChoice { player, .. }
             | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::ParadigmCastOffer { player, .. }

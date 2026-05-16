@@ -5520,13 +5520,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
         filter: TargetFilter,
-        /// Where the matching card goes (Hand or Battlefield).
+        /// Where the matching card goes (Hand or Battlefield). When
+        /// `kept_optional_to` is `Some`, this is repurposed as the *decline*
+        /// zone (where the kept card goes if the controller declines).
         kept_destination: Zone,
         /// Where non-matching revealed cards go (Library bottom or Graveyard).
         rest_destination: Zone,
         /// CR 110.5b: When true, the matching card enters the battlefield tapped.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_tapped: bool,
+        /// CR 701.20a + CR 608.2c: Optional kept destination — `Some(accept_zone)`
+        /// encodes "you may put that card onto the battlefield": the controller
+        /// chooses the kept card's destination. Accept → `accept_zone`; decline →
+        /// `kept_destination` (repurposed as the decline zone). `None` → the
+        /// kept card unconditionally goes to `kept_destination` (mandatory).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_optional_to: Option<Zone>,
     },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.

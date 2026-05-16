@@ -4248,6 +4248,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
         kept_destination: Zone::Hand,
         rest_destination: Zone::Library,
         enter_tapped: false,
+        kept_optional_to: None,
     }))
 }
 
@@ -27603,6 +27604,7 @@ mod tests {
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=Controller, creature->hand, rest->library, got: {:?}",
@@ -27632,6 +27634,7 @@ mod tests {
                     kept_destination: Zone::Hand,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Creature)
             ),
             "expected RevealUntil player=ParentTargetController, got: {:?}",
@@ -27704,6 +27707,7 @@ mod tests {
                     kept_destination: Zone::Graveyard,
                     rest_destination: Zone::Graveyard,
                     enter_tapped: false,
+                    kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Land)
             ),
             "expected RevealUntil(kept=Graveyard, rest=Graveyard), got: {:?}",
@@ -27779,6 +27783,7 @@ mod tests {
                     kept_destination: Zone::Battlefield,
                     rest_destination: Zone::Library,
                     enter_tapped: false,
+                    kept_optional_to: None,
                 } if type_filters.contains(&TypeFilter::Artifact)
             ),
             "expected RevealUntil player=Controller, artifact->battlefield, got: {:?}",
@@ -27885,6 +27890,80 @@ mod tests {
                 "rest_destination mismatch for text: {text}"
             );
         }
+    }
+
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield. If
+    /// you don't, put it into your hand." — Songbirds' Blessing shape. The
+    /// two-sentence kept-destination chunking must yield `kept_optional_to =
+    /// Some(Battlefield)` (accept zone) and `kept_destination = Hand` (the
+    /// explicit decline zone) without the second chunk clobbering the first.
+    #[test]
+    fn reveal_until_optional_kept_explicit_decline_to_hand() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a creature card. You may put that card onto the battlefield. If you don't, put it into your hand. Put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_optional_to: Some(Zone::Battlefield),
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected optional kept (accept=Battlefield, decline=Hand), got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield."
+    /// with no explicit "if you don't" — Genesis Storm / Hei Bai shape. The
+    /// declined card joins the bottom-of-library rest pile, so `kept_destination`
+    /// (the decline zone) defaults to `Library`.
+    #[test]
+    fn reveal_until_optional_kept_implicit_decline_to_library() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a creature card. You may put that card onto the battlefield. Then shuffle your library.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_optional_to: Some(Zone::Battlefield),
+                    kept_destination: Zone::Library,
+                    ..
+                }
+            ),
+            "expected optional kept (accept=Battlefield, decline=Library), got: {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 701.20a: A mandatory kept clause ("Put that card into your hand", no
+    /// "you may") must keep `kept_optional_to = None` — the optionality
+    /// detection must not regress the existing mandatory class.
+    #[test]
+    fn reveal_until_mandatory_kept_stays_none() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest into your graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_optional_to: None,
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Graveyard,
+                    ..
+                }
+            ),
+            "expected mandatory kept (kept_optional_to=None, kept=Hand), got: {:?}",
+            def.effect
+        );
     }
 
     #[test]

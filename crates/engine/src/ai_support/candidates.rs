@@ -247,6 +247,21 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
+        // both accept (put onto the battlefield) and decline (hand / rest pile)
+        // are legitimate plays, so emit both for the search to explore.
+        WaitingFor::RevealUntilKeptChoice { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 702.85a: Cascade offers a binary cast/decline choice. Tactical
         // ordering: place Cast first when the hit has at least one legal
         // target (or no targets at all — typically a permanent or untargeted
@@ -1916,6 +1931,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::DiscoverChoice { .. }
+        | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::CascadeChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }

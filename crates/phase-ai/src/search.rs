@@ -438,6 +438,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
+        // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
+        // as the search default; the candidate generator still explores decline.
+        WaitingFor::RevealUntilKeptChoice { .. } => {
+            Some(GameAction::DecideOptionalEffect { accept: true })
+        }
         WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
