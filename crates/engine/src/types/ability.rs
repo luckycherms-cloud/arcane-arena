@@ -3360,7 +3360,7 @@ pub enum StaticCondition {
     /// CR 903.3: True when the controller controls at least one of their commander(s).
     /// Used for Lieutenant mechanic ("if you control your commander").
     ControlsCommander,
-    /// CR 611.2b: True when the source object is tapped.
+    /// CR 110.5b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
     /// CR 702.62a + CR 611.2b: True when the source object's current controller
