@@ -8,6 +8,7 @@ mod coalition_relic_integration;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
 mod dalkovan_encampment_attack_trigger;
+mod dredgers_insight_mill_from_among;
 mod elemental_spectacle_regression;
 mod elusive_otter_repro;
 #[cfg(feature = "proptest")]

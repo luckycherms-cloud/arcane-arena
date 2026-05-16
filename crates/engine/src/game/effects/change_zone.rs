@@ -23,6 +23,72 @@ pub fn shuffle_library(state: &mut GameState, player: PlayerId) {
     }
 }
 
+/// CR 701.17c + CR 603.7: For a `TrackedSet` / `TrackedSetFiltered` target,
+/// resolve the zone its members currently occupy. Tracked sets are not
+/// zone-constrained — milled cards land in the graveyard, revealed cards stay
+/// in the library/hand — so an interactive `ChangeZone` selecting "from among"
+/// such a set must scan the members' actual zone, not the battlefield default.
+///
+/// The `TrackedSetId(0)` sentinel resolves to the most recent non-empty set,
+/// mirroring the binding pass in `resolve` (CR 603.7). Returns `None` when the
+/// filter is not tracked-set-backed or the set is empty/unbound.
+fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Zone> {
+    let id = match filter {
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+        _ => return None,
+    };
+    let members = if id == TrackedSetId(0) {
+        state
+            .tracked_object_sets
+            .iter()
+            .filter(|(_, objects)| !objects.is_empty())
+            .max_by_key(|(set_id, _)| set_id.0)
+            .map(|(_, objects)| objects)?
+    } else {
+        state.tracked_object_sets.get(&id)?
+    };
+    members
+        .iter()
+        .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
+}
+
+/// CR 603.7: Bind the `TrackedSetId(0)` sentinel to the most recent non-empty
+/// tracked set. The parser emits `TrackedSet`/`TrackedSetFiltered` with id `0`
+/// for inline "the milled/revealed/exiled cards" continuations; the concrete
+/// set id is only known at resolution time. Leaves non-sentinel filters and
+/// non-tracked-set filters untouched.
+fn resolve_tracked_set_sentinel(state: &GameState, filter: TargetFilter) -> TargetFilter {
+    let latest = || {
+        state
+            .tracked_object_sets
+            .iter()
+            .filter(|(_, objects)| !objects.is_empty())
+            .max_by_key(|(id, _)| id.0)
+            .map(|(&id, _)| id)
+    };
+    match filter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => latest().map_or(
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            |id| TargetFilter::TrackedSet { id },
+        ),
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter,
+        } => latest().map_or(
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: filter.clone(),
+            },
+            |id| TargetFilter::TrackedSetFiltered { id, filter },
+        ),
+        other => other,
+    }
+}
+
 /// Result of a single zone-move attempt through the replacement pipeline.
 pub(crate) enum ZoneMoveResult {
     /// Object was moved (or prevented). Continue processing.
@@ -321,10 +387,17 @@ pub fn resolve(
 
     let mut origin = origin;
 
-    let target_filter = match &ability.effect {
-        Effect::ChangeZone { target, .. } => target,
-        _ => &TargetFilter::Any,
+    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser
+    // for "from among the milled cards" / "X cards revealed this way"
+    // continuations to the most recent non-empty tracked set. Done up front so
+    // every downstream path (interactive scan, `matches_target_filter`,
+    // `tracked_set_member_zone`) sees the bound id — `matches_target_filter`
+    // looks the set up by exact id and would otherwise miss the sentinel.
+    let target_filter: TargetFilter = match &ability.effect {
+        Effect::ChangeZone { target, .. } => resolve_tracked_set_sentinel(state, target.clone()),
+        _ => TargetFilter::Any,
     };
+    let target_filter = &target_filter;
     if origin.is_none() && matches!(target_filter, TargetFilter::TriggeringSource) {
         origin = state
             .current_trigger_event
@@ -386,8 +459,17 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 701.17c + CR 603.7: A tracked-set filter ("from among the milled
+        // cards" / "X cards revealed this way") scopes the selection to a set
+        // of objects that may live in any zone (milled cards land in the
+        // graveyard, revealed cards in the library/hand). The tracked-set
+        // membership IS the scope — there is no fixed `InZone` constraint to
+        // extract — so derive the scan zone from the members' actual zone
+        // rather than defaulting to the battlefield (which would scan the
+        // wrong zone and silently offer nothing).
         let scan_zone = origin
             .or_else(|| target_filter.extract_in_zone())
+            .or_else(|| tracked_set_member_zone(state, target_filter))
             .unwrap_or(Zone::Battlefield);
         // Filter-controller override is primary here: when a filter like
         // "creature you control" needs "you" to resolve to the *target* player

@@ -1116,7 +1116,11 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
 
 fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::TrackedSet { .. } => true,
+        // CR 603.7: Both the bare tracked-set filter and its type-filtered
+        // intersection ("X cards revealed this way", "from among the milled
+        // cards") consume the most recent tracked set — either form on a
+        // sub-ability means the parent effect must publish its affected set.
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => true,
         TargetFilter::Not { filter } => filter_references_tracked_set(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_references_tracked_set)
@@ -1162,6 +1166,11 @@ fn affected_objects_from_events(effect: &Effect, events: &[GameEvent]) -> Vec<Ob
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
                 | Effect::ChangeZoneAll { destination, .. } => Some(*destination),
+                // CR 701.17a + CR 701.17c: Milled cards land in the `Mill`'s
+                // destination (Graveyard by default). Scoping the tracked set
+                // to that zone makes a downstream "from among the milled cards"
+                // sub-ability resolve against exactly the milled cards.
+                Effect::Mill { destination, .. } => Some(*destination),
                 Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
                 // CR 400.7 + CR 611.2c: Mass-bounce destination defaults to
                 // Hand; downstream "those creatures" / "for each of those

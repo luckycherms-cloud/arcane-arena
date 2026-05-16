@@ -1182,6 +1182,36 @@ pub(super) fn apply_clause_continuation(
                 if let Some(rd) = rest_dest {
                     *rest_destination = Some(rd);
                 }
+            } else if matches!(&*previous.effect, Effect::Mill { .. }) {
+                // CR 701.17c + CR 608.2c: "...from among the milled cards" after
+                // a `Mill`. The `Mill` already mills its `count` cards to its
+                // `destination` (CR 701.17a); the continuation reads that milled
+                // set. Unlike the `Dig` form (which patches the source effect's
+                // keep/filter), `Mill` keeps its own `count`/`destination`
+                // intact and we PUSH a fresh `ChangeZone` sub-ability that
+                // selects from the milled cards. `TrackedSetFiltered` with the
+                // sentinel `TrackedSetId(0)` resolves to the most recent tracked
+                // set at resolution — the engine auto-publishes the `Mill`'s
+                // affected objects (the milled cards) into that set. Phase-2
+                // sub-chain assembly folds this pushed def into `Mill.sub_ability`.
+                defs.push(AbilityDefinition::new(
+                    kind,
+                    Effect::ChangeZone {
+                        origin: None,
+                        destination: kept_dest.unwrap_or(Zone::Hand),
+                        target: TargetFilter::TrackedSetFiltered {
+                            id: crate::types::identifiers::TrackedSetId(0),
+                            filter: Box::new(card_filter),
+                        },
+                        owner_library: false,
+                        enter_transformed: false,
+                        under_your_control: false,
+                        enter_tapped: false,
+                        enters_attacking: false,
+                        up_to: is_up_to,
+                        enter_with_counters: vec![],
+                    },
+                ));
             }
         }
         ContinuationAst::ChooseFromExile { count, chooser } => {
@@ -2098,9 +2128,17 @@ pub(super) fn parse_followup_continuation_ast(
         // "Put up to N [filter] from among them/those cards onto the battlefield/into your hand"
         // and "put N of them into your hand [and the rest on the bottom]"
         // after Dig — patches keep_count, filter, destination on the preceding Dig effect.
-        Effect::Dig { .. }
+        //
+        // CR 701.17c: An effect that refers to a milled card finds it in the
+        // zone it moved to. "...from among the milled cards" after a `Mill`
+        // is the same "from among [a prior selection set]" continuation as the
+        // Dig form — `parse_dig_from_among` returns a `DigFromAmong`
+        // continuation which, in `apply_clause_continuation`, pushes a
+        // `TrackedSetFiltered`-targeted sub-ability when the source is a `Mill`.
+        Effect::Dig { .. } | Effect::Mill { .. }
             if (nom_primitives::scan_contains(&lower, "from among them")
                 || nom_primitives::scan_contains(&lower, "from among those cards")
+                || nom_primitives::scan_contains(&lower, "from among the milled cards")
                 || nom_primitives::scan_contains(&lower, "of them"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
                     || nom_primitives::scan_contains(&lower, "into your hand")
@@ -2956,6 +2994,97 @@ mod tests {
                 rest_destination: Some(Zone::Graveyard),
             })
         );
+    }
+
+    /// CR 701.17c + CR 608.2c: Dredger's Insight — "...You may put an
+    /// artifact, creature, or land card from among the milled cards into your
+    /// hand" after `Mill 4`. The continuation must fire for a preceding
+    /// `Effect::Mill` (not just `Effect::Dig`) and recognize the
+    /// "from among the milled cards" phrase.
+    #[test]
+    fn mill_from_among_milled_cards_emits_dig_from_among() {
+        let mill = Effect::Mill {
+            count: QuantityExpr::Fixed { value: 4 },
+            target: TargetFilter::Controller,
+            destination: Zone::Graveyard,
+        };
+        let result = parse_followup_continuation_ast(
+            "You may put an artifact, creature, or land card from among the milled cards into your hand.",
+            &mill,
+            &mut ParseContext::default(),
+        );
+        let Some(ContinuationAst::DigFromAmong {
+            count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+        }) = result
+        else {
+            panic!("expected DigFromAmong continuation, got {result:?}");
+        };
+        assert_eq!(count, 1);
+        assert!(up_to, "\"may put\" is optional → up_to");
+        assert_eq!(destination, Some(Zone::Hand));
+        assert_eq!(rest_destination, None);
+        // The Or[Artifact, Creature, Land] filter is carried through verbatim.
+        assert!(matches!(filter, TargetFilter::Or { .. }), "got {filter:?}");
+    }
+
+    /// CR 701.17c: `apply_clause_continuation` must PUSH a `ChangeZone`
+    /// sub-ability targeting `TrackedSetFiltered` when the preceding def is a
+    /// `Mill` — scoping the zone-change to the milled cards rather than the
+    /// raw `Or` filter (which would resolve against the battlefield).
+    #[test]
+    fn mill_from_among_pushes_tracked_set_filtered_change_zone() {
+        let or_filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(crate::types::ability::TypedFilter::default()),
+                TargetFilter::Typed(crate::types::ability::TypedFilter::default()),
+            ],
+        };
+        let mut defs = vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+        )];
+        apply_clause_continuation(
+            &mut defs,
+            ContinuationAst::DigFromAmong {
+                count: 1,
+                up_to: true,
+                filter: or_filter.clone(),
+                destination: Some(Zone::Hand),
+                rest_destination: None,
+            },
+            AbilityKind::Spell,
+        );
+        // The Mill is left intact; a new ChangeZone def is pushed.
+        assert_eq!(defs.len(), 2, "expected Mill + pushed ChangeZone");
+        assert!(matches!(&*defs[0].effect, Effect::Mill { .. }));
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            up_to,
+            ..
+        } = &*defs[1].effect
+        else {
+            panic!("expected pushed ChangeZone, got {:?}", defs[1].effect);
+        };
+        assert_eq!(*origin, None);
+        assert_eq!(*destination, Zone::Hand);
+        assert!(*up_to);
+        match target {
+            TargetFilter::TrackedSetFiltered { id, filter } => {
+                assert_eq!(id.0, 0, "sentinel TrackedSetId(0) — resolved at runtime");
+                assert_eq!(**filter, or_filter, "inner filter preserved");
+            }
+            other => panic!("expected TrackedSetFiltered target, got {other:?}"),
+        }
     }
 
     #[test]
