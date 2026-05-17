@@ -1163,7 +1163,7 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 603.7c: Numeric value from the triggering event.
+        // CR 608.2c: Numeric value from the triggering event.
         // Falls back to the preceding effect's count or amount for sub_ability
         // continuations where current_trigger_event has no amount (e.g.,
         // "discard up to N, then draw that many"; "dealt excess damage this

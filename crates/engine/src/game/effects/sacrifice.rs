@@ -314,8 +314,9 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter};
+    use crate::types::ability::{Effect, QuantityRef, TargetFilter};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -803,6 +804,289 @@ mod tests {
                 );
             }
             other => panic!("unexpected waiting_for: {other:?}"),
+        }
+    }
+
+    /// Issue #458: Scapeshift end-to-end. Drives the real parser + engine
+    /// pipeline — parse the actual Oracle text, assert the AST, then resolve
+    /// the chain and verify the player may sacrifice 0..=all lands (not exactly
+    /// one) and search for "that many" land cards.
+    /// CR 107.1c (any number includes zero) + CR 608.2c (back-reference count).
+    fn scapeshift_ability() -> ResolvedAbility {
+        let parsed = crate::parser::parse_oracle_text(
+            "Sacrifice any number of lands. Search your library for up to that many \
+             land cards, put them onto the battlefield tapped, then shuffle.",
+            "Scapeshift",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            1,
+            "Scapeshift has one spell ability"
+        );
+        crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    fn assert_scapeshift_ast(effect: &Effect) {
+        // Top-level: Sacrifice with UpTo(ObjectCount{Land}) and min_count 0.
+        let Effect::Sacrifice {
+            count, min_count, ..
+        } = effect
+        else {
+            panic!("expected Effect::Sacrifice, got {effect:?}");
+        };
+        assert_eq!(*min_count, 0, "\"any number\" includes zero (CR 107.1c)");
+        let QuantityExpr::UpTo { max } = count else {
+            panic!("expected UpTo sacrifice count, got {count:?}");
+        };
+        assert!(
+            matches!(
+                **max,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                }
+            ),
+            "expected ObjectCount ceiling, got {max:?}"
+        );
+    }
+
+    fn scapeshift_search_effect(chain: &ResolvedAbility) -> Effect {
+        let mut node = chain;
+        loop {
+            if matches!(node.effect, Effect::SearchLibrary { .. }) {
+                return node.effect.clone();
+            }
+            node = node
+                .sub_ability
+                .as_deref()
+                .expect("SearchLibrary must exist in the Scapeshift chain");
+        }
+    }
+
+    fn scapeshift_state(land_card_ids: &[u64]) -> (GameState, Vec<ObjectId>) {
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Five battlefield lands controlled by PlayerId(0).
+        let mut battlefield_lands = Vec::new();
+        for i in 0..5u64 {
+            let id = create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("BF Land {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            battlefield_lands.push(id);
+        }
+
+        // Land cards in the library.
+        for &card_id in land_card_ids {
+            let id = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Library Land {card_id}"),
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+        // A non-land library card to prove the search filter is applied.
+        let spell = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Library Spell".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        (state, battlefield_lands)
+    }
+
+    #[test]
+    fn scapeshift_sacrifice_three_lands_searches_for_three() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let chain = scapeshift_ability();
+        assert_scapeshift_ast(&chain.effect);
+
+        // SearchLibrary count must carry the EventContextAmount back-reference,
+        // wrapped as UpTo so the searcher picks 0..=that-many.
+        match scapeshift_search_effect(&chain) {
+            Effect::SearchLibrary { count, .. } => {
+                let QuantityExpr::UpTo { max } = count else {
+                    panic!("expected UpTo search count, got {count:?}");
+                };
+                assert_eq!(
+                    *max,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                    "search count must back-reference the sacrificed count"
+                );
+            }
+            other => panic!("expected SearchLibrary, got {other:?}"),
+        }
+
+        let (mut state, battlefield_lands) = scapeshift_state(&[20, 21, 22, 23]);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        // Player may sacrifice 0..=5 lands — proves it is not a fixed 1.
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 5, "all five battlefield lands are eligible");
+                assert_eq!(*min_count, 0, "may sacrifice zero (CR 107.1c)");
+                assert!(*up_to, "variable-count sacrifice");
+                assert_eq!(cards.len(), 5);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+
+        // Sacrifice exactly 3 lands.
+        let chosen: Vec<ObjectId> = battlefield_lands[..3].to_vec();
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: chosen.clone(),
+            },
+        )
+        .unwrap();
+
+        for id in &chosen {
+            assert!(
+                state.players[0].graveyard.contains(id),
+                "sacrificed land should be in graveyard"
+            );
+        }
+        assert_eq!(state.last_effect_count, Some(3), "stamped sacrificed count");
+
+        // The SearchLibrary continuation: pick limit is the "that many" = 3
+        // (the sacrificed count). The eligible pool is all 4 library lands —
+        // the non-land library card is excluded by the Land filter.
+        let search_cards = match &result.waiting_for {
+            WaitingFor::SearchChoice {
+                player,
+                cards,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 3, "\"that many\" resolved to 3 sacrificed");
+                assert!(*up_to);
+                assert_eq!(
+                    cards.len(),
+                    4,
+                    "all 4 library lands match (non-land excluded)"
+                );
+                cards.clone()
+            }
+            other => panic!("expected SearchChoice, got {other:?}"),
+        };
+
+        // Select 3 land cards — they enter the battlefield tapped, then shuffle.
+        let found: Vec<ObjectId> = search_cards[..3].to_vec();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: found.clone(),
+            },
+        )
+        .unwrap();
+
+        let on_bf_tapped = found
+            .iter()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.tapped)
+            })
+            .count();
+        assert_eq!(
+            on_bf_tapped, 3,
+            "all 3 found lands enter the battlefield tapped"
+        );
+    }
+
+    #[test]
+    fn scapeshift_sacrifice_zero_lands_searches_for_zero() {
+        use crate::game::engine::apply;
+        use crate::types::actions::GameAction;
+
+        let chain = scapeshift_ability();
+        let (mut state, _battlefield_lands) = scapeshift_state(&[20, 21, 22, 23]);
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &chain, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+
+        // Sacrifice zero lands — must not panic. The "that many" back-reference
+        // resolves to 0, so the search may pick at most 0 cards.
+        let result = apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![] },
+        )
+        .unwrap();
+        assert_eq!(state.last_effect_count, Some(0));
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "no land should have been sacrificed, found {:?}",
+            state.players[0].graveyard
+        );
+        // If a SearchChoice is presented at all, its pick limit must be 0.
+        if let WaitingFor::SearchChoice { count, .. } = &result.waiting_for {
+            assert_eq!(*count, 0, "search for \"up to 0\" must allow 0 picks");
         }
     }
 }

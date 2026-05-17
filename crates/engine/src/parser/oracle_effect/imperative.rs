@@ -726,17 +726,22 @@ fn strip_sacrifice_count_suffix(target_text: &str) -> String {
     }
 }
 
-/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" sacrifice choices.
-/// `UpTo(ObjectCount(filter))` provides the dynamic upper bound, while
-/// `min_count = 1` preserves the printed lower bound after the player accepts
-/// the surrounding optional action.
-fn parse_one_or_more_sacrifice(
+/// CR 701.21a + CR 107.1c: Parse "one or more [objects]" / "any number of
+/// [objects]" sacrifice choices. `UpTo(ObjectCount(filter))` provides the
+/// dynamic upper bound; `min_count` carries the printed lower bound — `1` for
+/// "one or more", and `0` for "any number of" (CR 107.1c: a player choosing
+/// "any number" may choose any positive number or zero).
+pub(super) fn parse_one_or_more_sacrifice(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<(QuantityExpr, TargetFilter, usize)> {
     let lower = text.to_lowercase();
-    let (_, filter_text) = nom_on_lower(text, &lower, |input| {
-        value((), tag("one or more ")).parse(input)
+    let (min_count, filter_text) = nom_on_lower(text, &lower, |input| {
+        alt((
+            value(1usize, tag("one or more ")),
+            value(0usize, tag("any number of ")),
+        ))
+        .parse(input)
     })?;
     let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(
         strip_article(filter_text.trim_start()).trim_end_matches('.'),
@@ -751,7 +756,7 @@ fn parse_one_or_more_sacrifice(
             filter: target.clone(),
         },
     });
-    Some((count, target, 1))
+    Some((count, target, min_count))
 }
 
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
@@ -6604,6 +6609,40 @@ mod tests {
                     }
                     other => panic!("expected Typed target, got {other:?}"),
                 }
+                match count {
+                    QuantityExpr::UpTo { max } => match *max {
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        } => assert_eq!(filter, target),
+                        other => panic!("expected ObjectCount max, got {other:?}"),
+                    },
+                    other => panic!("expected UpTo count, got {other:?}"),
+                }
+            }
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    // Issue #458: "sacrifice any number of <filter>" — Scapeshift class.
+    // CR 107.1c: "any number" includes zero, so `min_count` is 0 (vs. 1 for
+    // "one or more"). The dynamic `UpTo(ObjectCount)` ceiling is unchanged.
+    #[test]
+    fn parse_sacrifice_any_number_of_lands_uses_zero_min_count() {
+        let text = "sacrifice any number of lands";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext {
+            actor: Some(ControllerRef::You),
+            ..Default::default()
+        };
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice {
+                target,
+                count,
+                min_count,
+            } => {
+                assert_eq!(min_count, 0, "\"any number\" includes zero (CR 107.1c)");
                 match count {
                     QuantityExpr::UpTo { max } => match *max {
                         QuantityExpr::Ref {

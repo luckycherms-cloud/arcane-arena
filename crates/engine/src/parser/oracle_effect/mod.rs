@@ -5603,6 +5603,22 @@ fn try_parse_verb_and_target<'a>(
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
+        // CR 107.1c + CR 701.21a: "sacrifice one or more / any number of
+        // <filter>" — delegate to the single variable-count-sacrifice
+        // authority so the dynamic `UpTo(ObjectCount)` ceiling and the
+        // matched `min_count` (1 vs 0) are produced consistently with the
+        // single-imperative path in `parse_targeted_action_ast`.
+        if let Some((count, target, min_count)) = imperative::parse_one_or_more_sacrifice(rest, ctx)
+        {
+            return Some((
+                TargetedImperativeAst::Sacrifice {
+                    target,
+                    count,
+                    min_count,
+                },
+                "",
+            ));
+        }
         let (count, after_count) = super::oracle_util::parse_count_expr(rest).unwrap_or((
             crate::types::ability::QuantityExpr::Fixed { value: 1 },
             rest,
@@ -12936,15 +12952,15 @@ fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
 
 /// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
 /// not a resource count (counters, life, etc.).
-const MULTI_TARGET_VERBS: &[&str] = &[
-    "exile",
-    "tap",
-    "untap",
-    "sacrifice",
-    "return",
-    "destroy",
-    "choose",
-];
+///
+/// `sacrifice` is intentionally excluded: per CR 701.21a a player sacrifices
+/// their own permanents by choice during resolution — sacrifice never targets.
+/// "Sacrifice any number of <filter>" is a variable-count choice resolved via
+/// `EffectZoneChoice` (CR 107.1c), modeled as `Effect::Sacrifice { count:
+/// UpTo(ObjectCount), min_count: 0 }` by `parse_one_or_more_sacrifice` — not a
+/// `MultiTargetSpec`. Routing it through this list would strip the quantifier
+/// and collapse the count to a fixed 1 (issue #458).
+const MULTI_TARGET_VERBS: &[&str] = &["exile", "tap", "untap", "return", "destroy", "choose"];
 
 /// CR 115.1d: Strip numeric word prefix before "target" from effect text.
 /// "two target creatures" → (2, "target creatures")
