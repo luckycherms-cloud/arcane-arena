@@ -263,7 +263,7 @@ fn collect_matching_triggers(
             if matches!(trig_def.mode, TriggerMode::TapsForMana)
                 && matches!(
                     event,
-                    GameEvent::ManaAdded {
+                    GameEvent::TappedForMana {
                         tap_state: ManaTapState::FromTapTriggersResolved,
                         ..
                     }
@@ -464,7 +464,7 @@ fn event_is_suppressed_by_static_triggers(state: &GameState, event: &GameEvent) 
 /// mid-payment, where a modal/targeted trigger could corrupt the in-flight cast.
 ///
 /// `events[events_before..]` is the batch produced by auto-tap. Every freshly
-/// produced `FromTap` `ManaAdded` event in that range is flipped to
+/// produced `FromTap` `TappedForMana` event in that range is flipped to
 /// `FromTapTriggersResolved`; the post-action scan's double-resolution guard
 /// keys off that marker to skip the triggered mana abilities resolved here.
 pub(super) fn resolve_tap_mana_triggers_inline(
@@ -480,7 +480,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     for idx in events_before..scan_end {
         let tap_event = match events.get(idx) {
             Some(
-                ev @ GameEvent::ManaAdded {
+                ev @ GameEvent::TappedForMana {
                     tap_state: ManaTapState::FromTap,
                     ..
                 },
@@ -530,7 +530,7 @@ pub(super) fn resolve_tap_mana_triggers_inline(
     // triggers on `FromTapTriggersResolved` events; non-mana `TapsForMana`
     // triggers still match and fire there (CR 603.3).
     for ev in &mut events[events_before..scan_end] {
-        if let GameEvent::ManaAdded { tap_state, .. } = ev {
+        if let GameEvent::TappedForMana { tap_state, .. } = ev {
             if matches!(tap_state, ManaTapState::FromTap) {
                 *tap_state = ManaTapState::FromTapTriggersResolved;
             }
@@ -8228,11 +8228,11 @@ pub mod tests {
             );
         }
 
-        // Simulate tapping the Forest for mana: ManaAdded with tapped_for_mana=true.
-        let events = vec![GameEvent::ManaAdded {
+        // Simulate tapping the Forest for mana: TappedForMana (CR 106.12a).
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 
@@ -8340,10 +8340,10 @@ pub mod tests {
         }
 
         // P0 taps their Forest for mana.
-        let events = vec![GameEvent::ManaAdded {
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 
@@ -8434,11 +8434,11 @@ pub mod tests {
             );
         }
 
-        // Tap the Forest for mana — emits ManaAdded{Green, tapped_for_mana=true}.
-        let events = vec![GameEvent::ManaAdded {
+        // Tap the Forest for mana — emits TappedForMana (CR 106.12a).
+        let events = vec![GameEvent::TappedForMana {
             player_id: PlayerId(0),
-            mana_type: crate::types::mana::ManaType::Green,
             source_id: forest,
+            produced: vec![crate::types::mana::ManaType::Green],
             tap_state: ManaTapState::FromTap,
         }];
 

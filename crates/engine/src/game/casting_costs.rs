@@ -5,7 +5,7 @@ use crate::types::ability::{
     Effect, KickerVariant, QuantityExpr, ResolvedAbility, SpellCastingOptionKind, TargetFilter,
     TypedFilter,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast, StackEntry,
     StackEntryKind, WaitingFor,
@@ -3186,6 +3186,16 @@ fn auto_tap_mana_sources_inner(
                 true,
                 events,
             );
+            // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+            // always includes `{T}` in its cost, so this auto-tap fallback
+            // taps the land for mana. Emit one `TappedForMana` per resolution
+            // so `TapsForMana` triggers fire exactly once.
+            events.push(GameEvent::TappedForMana {
+                player_id: player,
+                source_id: option.object_id,
+                produced: vec![option.mana_type],
+                tap_state: ManaTapState::FromTap,
+            });
         }
     }
 }

@@ -4042,6 +4042,16 @@ pub(super) fn handle_tap_land_for_mana(
             true,
             events,
         );
+        // CR 106.12 + CR 106.12a: a basic/subtype-only land's intrinsic mana
+        // ability always includes `{T}`. Emit one `TappedForMana` per
+        // resolution so `TapsForMana` triggers fire exactly once (mirrors the
+        // ability-resolution path in `produce_mana_from_ability`).
+        events.push(GameEvent::TappedForMana {
+            player_id: player,
+            source_id: object_id,
+            produced: vec![mana_option.mana_type],
+            tap_state: crate::types::events::ManaTapState::FromTap,
+        });
         state
             .lands_tapped_for_mana
             .entry(player)

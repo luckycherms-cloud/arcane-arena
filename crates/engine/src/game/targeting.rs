@@ -563,6 +563,9 @@ pub(crate) fn extract_source_from_event(
         // CR 106.3 + CR 605.1a: For TapsForMana triggers, "that land" / "that permanent"
         // resolves to the mana source — the land/permanent being tapped for mana.
         GameEvent::ManaAdded { source_id, .. } => Some(*source_id),
+        // CR 106.12a: `TappedForMana` is the per-resolution event a `TapsForMana`
+        // trigger fires from; `source_id` is the permanent tapped for mana.
+        GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
@@ -608,6 +611,9 @@ pub(crate) fn extract_player_from_event(
         // rebinds as the resolving ability's controller so the bonus mana
         // routes to the tapper even when the Aura is opponent-controlled.
         GameEvent::ManaAdded { player_id, .. } => Some(*player_id),
+        // CR 106.12a + CR 605.1b: `TappedForMana` carries the player who tapped
+        // the source for mana — the triggering player for `TapsForMana`.
+        GameEvent::TappedForMana { player_id, .. } => Some(*player_id),
         GameEvent::CardsDrawn { player_id, .. } => Some(*player_id),
         GameEvent::CardDrawn { player_id, .. } => Some(*player_id),
         GameEvent::Discarded { player_id, .. } => Some(*player_id),
