@@ -6168,7 +6168,7 @@ pub fn handle_activate_ability(
             state.pending_activations.push((source_id, ability_index));
             events.push(GameEvent::AbilityActivated { source_id });
             // CR 702.142b: Emit additional event when a boast ability is activated.
-            super::casting_targets::emit_boast_event_if_tagged(
+            super::casting_targets::emit_keyword_ability_event_if_tagged(
                 state,
                 source_id,
                 ability_index,
@@ -6235,7 +6235,7 @@ pub fn handle_activate_ability(
     state.pending_activations.push((source_id, ability_index));
     events.push(GameEvent::AbilityActivated { source_id });
     // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_boast_event_if_tagged(
+    super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
         ability_index,
@@ -6786,13 +6786,13 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
-        ActivationRestriction, BasicLandType, CastPermissionConstraint, CastVariantPaid,
-        CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
-        ControllerRef, CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant,
-        ManaContribution, ManaProduction, ManaSpendPermission, ManaSpendRestriction,
-        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, RestrictionExpiry,
-        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityTag, ActivationRestriction, BasicLandType, CastPermissionConstraint,
+        CastVariantPaid, CastingPermission, ChosenAttribute, ChosenSubtypeKind, Comparator,
+        ContinuousModification, ControllerRef, CostCategory, FilterProp, GainLifePlayer,
+        GameRestriction, KickerVariant, ManaContribution, ManaProduction, ManaSpendPermission,
+        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -10771,6 +10771,44 @@ mod tests {
         let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
 
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn exhaust_ability_only_once_is_enforced_and_emits_event() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(73),
+            PlayerId(0),
+            "Adrenaline Jockey".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .activation_restrictions(vec![ActivationRestriction::OnlyOnce]);
+        ability.ability_tag = Some(AbilityTag::Exhaust);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+
+        let mut events = Vec::new();
+        handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events).unwrap();
+        let second = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events);
+
+        assert!(second.is_err());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ExhaustAbilityActivated {
+                player_id: PlayerId(0),
+                source_id,
+                is_mana_ability: false,
+            } if *source_id == source
+        )));
     }
 
     #[test]

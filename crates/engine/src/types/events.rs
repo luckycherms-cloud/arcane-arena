@@ -516,6 +516,15 @@ pub enum GameEvent {
         source_id: ObjectId,
     },
 
+    /// CR 702.177a: An exhaust ability was activated. Emitted alongside
+    /// AbilityActivated for stack-using abilities and from the inline mana
+    /// ability path for mana abilities.
+    ExhaustAbilityActivated {
+        player_id: PlayerId,
+        source_id: ObjectId,
+        is_mana_ability: bool,
+    },
+
     /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
     CreatureExploited {
         exploiter: ObjectId,

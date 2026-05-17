@@ -530,6 +530,7 @@ fn effective_activation_limit(
     };
     let keyword = match tag {
         AbilityTag::Boast => "boast",
+        AbilityTag::Exhaust => "exhaust",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;

@@ -1766,6 +1766,39 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
+        // Priority 3e: Exhaust — "Exhaust — {cost}: {effect}" (CR 702.177a)
+        // Exhaust is a keyword ability that grants an activated ability with
+        // the implicit activation restriction "Activate only once."
+        if let Some(((), rest_original)) = nom_on_lower(&line, &lower, |i| {
+            value((), alt((tag("exhaust \u{2014} "), tag("exhaust -- ")))).parse(i)
+        }) {
+            let rest_lower = rest_original.to_lowercase();
+            if let Some(colon_pos) = find_activated_colon(&rest_lower) {
+                let prefix_len = line.len() - rest_original.len();
+                let cost_text = line[prefix_len..prefix_len + colon_pos].trim();
+                let effect_text = line[prefix_len + colon_pos + 1..].trim();
+                let (effect_text, constraints) = strip_activated_constraints(effect_text);
+                let cost = parse_oracle_cost(cost_text);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
+                def.cost = Some(cost);
+                def.description = Some(line.to_string());
+                if constraints.sorcery_speed() {
+                    def.sorcery_speed = true;
+                }
+                def.activation_restrictions.extend(constraints.restrictions);
+                def.activation_restrictions
+                    .push(ActivationRestriction::OnlyOnce);
+                def.ability_tag = Some(AbilityTag::Exhaust);
+                extract_cost_reduction_from_chain(&mut def);
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 4: Activated ability — contains ":" with cost-like prefix
         if let Some(colon_pos) = find_activated_colon(&line) {
             let cost_text = line[..colon_pos].trim();
@@ -8094,6 +8127,33 @@ mod tests {
         assert!(r.abilities[0]
             .activation_restrictions
             .contains(&ActivationRestriction::OnlyOnceEachTurn),);
+    }
+
+    #[test]
+    fn exhaust_mana_cost_parses_as_activated_with_once_per_game_restriction() {
+        let r = parse(
+            "Exhaust \u{2014} {3}: Draw a card.",
+            "Adrenaline Jockey",
+            &[],
+            &["Creature"],
+            &["Human", "Pilot"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.ability_tag, Some(AbilityTag::Exhaust));
+        assert!(matches!(
+            ability.cost,
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 3, .. }
+            })
+        ));
+        assert!(
+            ability
+                .activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnce),
+            "Exhaust must have OnlyOnce restriction"
+        );
     }
 
     #[test]

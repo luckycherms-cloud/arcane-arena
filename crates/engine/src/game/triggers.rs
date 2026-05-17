@@ -2498,6 +2498,12 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
+        TriggerCondition::ActivatedAbilityIsNonMana => match trigger_event {
+            Some(GameEvent::ExhaustAbilityActivated {
+                is_mana_ability, ..
+            }) => !*is_mana_ability,
+            _ => false,
+        },
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
         // trigger source this turn.
         TriggerCondition::DealtDamageBySourceThisTurn => {

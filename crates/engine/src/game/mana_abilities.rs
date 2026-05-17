@@ -346,6 +346,13 @@ pub fn activate_mana_ability(
             required_zone
         )));
     }
+    super::restrictions::check_activation_restrictions(
+        state,
+        player,
+        source_id,
+        ability_index,
+        &ability_def.activation_restrictions,
+    )?;
 
     advance_mana_ability_activation(
         state,
@@ -364,6 +371,23 @@ pub fn activate_mana_ability(
         },
         events,
     )
+}
+
+fn complete_mana_ability_activation(
+    state: &mut GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    super::restrictions::record_ability_activation(state, source_id, ability_index);
+    super::casting_targets::emit_keyword_ability_event_if_tagged(
+        state,
+        source_id,
+        ability_index,
+        player,
+        events,
+    );
 }
 
 /// Extract the prompt shape for a mana ability that requires a player choice.
@@ -526,6 +550,13 @@ pub fn handle_choose_mana_color(
         events,
         Some(override_value),
         pending.cost_paid_object.clone(),
+    );
+    complete_mana_ability_activation(
+        state,
+        pending.source_id,
+        pending.ability_index,
+        pending.player,
+        events,
     );
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
@@ -916,6 +947,13 @@ fn advance_mana_ability_activation(
         pending.chosen_mana_payment.as_deref(),
         pending.cost_paid_object,
     )?;
+    complete_mana_ability_activation(
+        state,
+        pending.source_id,
+        pending.ability_index,
+        pending.player,
+        events,
+    );
     Ok(resume_waiting_for(pending.player, pending.resume))
 }
 
@@ -1999,10 +2037,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityKind, ContinuousModification, ControllerRef,
-        DevotionColors, Duration, Effect, LinkedExileScope, ManaContribution, ManaProduction,
-        MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction,
+        ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, LinkedExileScope,
+        ManaContribution, ManaProduction, MultiTargetSpec, PlayerScope, QuantityExpr, QuantityRef,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
@@ -2123,6 +2161,148 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::ManaAdded { .. })));
+    }
+
+    #[test]
+    fn exhaust_mana_ability_only_once_is_enforced_and_emits_mana_event() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Loot, the Pathfinder".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .activation_restrictions(vec![ActivationRestriction::OnlyOnce]);
+        def.ability_tag = Some(AbilityTag::Exhaust);
+        Arc::make_mut(&mut state.objects.get_mut(&obj_id).unwrap().abilities).push(def.clone());
+
+        let mut events = Vec::new();
+        activate_mana_ability(
+            &mut state,
+            obj_id,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+        let second = activate_mana_ability(
+            &mut state,
+            obj_id,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        );
+
+        assert!(second.is_err());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ExhaustAbilityActivated {
+                player_id: PlayerId(0),
+                source_id,
+                is_mana_ability: true,
+            } if *source_id == obj_id
+        )));
+    }
+
+    #[test]
+    fn exhaust_prompted_mana_ability_records_after_choice() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Exhaust Filter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    contribution: ManaContribution::Base,
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .activation_restrictions(vec![ActivationRestriction::OnlyOnce]);
+        def.ability_tag = Some(AbilityTag::Exhaust);
+        Arc::make_mut(&mut state.objects.get_mut(&obj_id).unwrap().abilities).push(def.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            obj_id,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ExhaustAbilityActivated { .. })));
+        let WaitingFor::ChooseManaColor {
+            choice, context, ..
+        } = waiting
+        else {
+            panic!("expected ChooseManaColor");
+        };
+        let pending = expect_mana_ability_context(context);
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &choice,
+            ManaChoice::SingleColor(ManaType::White),
+            &mut events,
+        )
+        .unwrap();
+        let second = activate_mana_ability(
+            &mut state,
+            obj_id,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        );
+
+        assert!(second.is_err());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::ExhaustAbilityActivated {
+                player_id: PlayerId(0),
+                source_id,
+                is_mana_ability: true,
+            } if *source_id == obj_id
+        )));
     }
 
     // CR 106.6: A mana ability that attaches a spend restriction (Flamebraider:

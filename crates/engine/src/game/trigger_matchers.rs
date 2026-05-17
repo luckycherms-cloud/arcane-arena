@@ -109,6 +109,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::SaddlesOrCrews => match_saddles_or_crews,
         TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::BoastAbilityActivated => match_boast_ability_activated,
+        TriggerMode::ExhaustAbilityActivated => match_exhaust_ability_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -423,6 +424,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(
         TriggerMode::BoastAbilityActivated,
         match_boast_ability_activated,
+    );
+    r.insert(
+        TriggerMode::ExhaustAbilityActivated,
+        match_exhaust_ability_activated,
     );
 
     // Avatar crossover: bending trigger matchers
@@ -2217,6 +2222,24 @@ pub(super) fn match_boast_ability_activated(
     }
 }
 
+/// CR 702.177a + CR 603.2: Matches when a player activates an exhaust ability.
+pub(super) fn match_exhaust_ability_activated(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::ExhaustAbilityActivated { player_id, .. } = event {
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
 pub(super) fn match_unimplemented(
     _event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -2606,6 +2629,39 @@ mod tests {
             },
             &trigger,
             plotted,
+            &state
+        ));
+    }
+
+    #[test]
+    fn exhaust_ability_activation_matches_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rangers' Aetherhive".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::ExhaustAbilityActivated);
+
+        assert!(match_exhaust_ability_activated(
+            &GameEvent::ExhaustAbilityActivated {
+                player_id: PlayerId(0),
+                source_id: ObjectId(99),
+                is_mana_ability: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_exhaust_ability_activated(
+            &GameEvent::BoastAbilityActivated {
+                player_id: PlayerId(0),
+                source_id: ObjectId(99),
+            },
+            &trigger,
+            source,
             &state
         ));
     }

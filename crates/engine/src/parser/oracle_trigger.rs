@@ -2527,6 +2527,25 @@ fn try_parse_keyword_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             def.mode = TriggerMode::BoastAbilityActivated;
             return Some((TriggerMode::BoastAbilityActivated, def));
         }
+        if all_consuming(tag::<_, _, OracleError<'_>>("an exhaust ability"))
+            .parse(rest)
+            .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::ExhaustAbilityActivated;
+            return Some((TriggerMode::ExhaustAbilityActivated, def));
+        }
+        if all_consuming(tag::<_, _, OracleError<'_>>(
+            "an exhaust ability that isn't a mana ability",
+        ))
+        .parse(rest)
+        .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::ExhaustAbilityActivated;
+            def.condition = Some(TriggerCondition::ActivatedAbilityIsNonMana);
+            return Some((TriggerMode::ExhaustAbilityActivated, def));
+        }
     }
     None
 }
@@ -13187,6 +13206,29 @@ mod tests {
         assert_eq!(triggers.len(), 1);
         assert_eq!(triggers[0].mode, TriggerMode::NinjutsuActivated);
         assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn exhaust_activation_trigger() {
+        let def = parse_trigger_line(
+            "Whenever you activate an exhaust ability, draw a card.",
+            "Rangers' Aetherhive",
+        );
+        assert_eq!(def.mode, TriggerMode::ExhaustAbilityActivated);
+        assert_eq!(def.condition, None);
+    }
+
+    #[test]
+    fn exhaust_activation_trigger_non_mana_qualifier() {
+        let def = parse_trigger_line(
+            "Whenever you activate an exhaust ability that isn't a mana ability, draw a card.",
+            "Sala, Deck Boss",
+        );
+        assert_eq!(def.mode, TriggerMode::ExhaustAbilityActivated);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---

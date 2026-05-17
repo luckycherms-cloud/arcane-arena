@@ -7218,6 +7218,8 @@ impl<'de> Deserialize<'de> for ModalSelectionCondition {
 pub enum AbilityTag {
     /// CR 702.142a: This ability originated from a Boast keyword definition.
     Boast,
+    /// CR 702.177a: This ability originated from an Exhaust keyword definition.
+    Exhaust,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -8061,6 +8063,10 @@ pub enum TriggerCondition {
     /// specified cast/activation variant this turn. Negation ("unless it escaped")
     /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
     CastVariantPaid { variant: CastVariantPaid },
+
+    /// CR 605.1a + CR 603.4: Event qualifier for "that isn't a mana ability"
+    /// on activated-ability trigger events.
+    ActivatedAbilityIsNonMana,
 
     /// CR 700.4 + CR 120.1: "a creature dealt damage by ~ this turn dies" — death trigger
     /// gated on the dying creature having been dealt damage by the trigger source this turn.

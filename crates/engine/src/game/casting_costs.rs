@@ -954,7 +954,7 @@ fn push_ability_entry(
     state.pending_activations.push((source_id, ability_index));
     events.push(GameEvent::AbilityActivated { source_id });
     // CR 702.142b: Emit additional event when a boast ability is activated.
-    super::casting_targets::emit_boast_event_if_tagged(
+    super::casting_targets::emit_keyword_ability_event_if_tagged(
         state,
         source_id,
         ability_index,

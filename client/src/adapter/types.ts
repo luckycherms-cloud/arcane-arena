@@ -1191,6 +1191,7 @@ export type GameEvent =
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   | { type: "AbilityActivated"; data: { source_id: ObjectId } }
+  | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   | { type: "ZoneChanged"; data: { object_id: ObjectId; from: Zone; to: Zone } }
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
