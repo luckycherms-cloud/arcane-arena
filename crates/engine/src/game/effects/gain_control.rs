@@ -252,6 +252,78 @@ mod tests {
         );
     }
 
+    /// CR 611.2b + CR 110.5d + CR 613.1b: Callous Oppressor regression (issue
+    /// #498). A `ForAsLongAs { SourceIsTapped }` gain-control effect must end
+    /// when the tapped source leaves the battlefield — an off-battlefield card
+    /// is neither tapped nor untapped, so the duration condition becomes false
+    /// and the Layer 2 base-controller reset reverts control to the owner.
+    ///
+    /// Reverted-fix-discriminating: pre-fix the graveyard Oppressor still has
+    /// `tapped == true`, `SourceIsTapped` returns `true`, the `ChangeController`
+    /// TCE keeps applying, and the final assertion fails.
+    #[test]
+    fn gain_control_for_as_long_as_tapped_ends_when_source_leaves_battlefield() {
+        use crate::types::ability::{Duration, StaticCondition};
+
+        let mut state = GameState::new_two_player(42);
+
+        // The Oppressor: controlled by PlayerId(0), on the battlefield, tapped.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Callous Oppressor".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().tapped = true;
+
+        // The stolen creature: owned/controlled by PlayerId(1).
+        let target_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().base_controller,
+            Some(PlayerId(1)),
+            "target's base controller should be its owner",
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GainControl {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(target_id)],
+            source,
+            PlayerId(0),
+        );
+        ability.duration = Some(Duration::ForAsLongAs {
+            condition: StaticCondition::SourceIsTapped,
+        });
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().controller,
+            PlayerId(0),
+            "control should be gained while the tapped Oppressor is on the battlefield",
+        );
+
+        // The Oppressor dies (or is otherwise removed) while still tapped.
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+
+        crate::game::layers::evaluate_layers(&mut state);
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().controller,
+            PlayerId(1),
+            "control must revert to the owner once the tapped source leaves the battlefield",
+        );
+    }
+
     #[test]
     fn gain_control_nonexistent_target_returns_error() {
         let mut state = GameState::new_two_player(42);

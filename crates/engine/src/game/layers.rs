@@ -485,10 +485,17 @@ fn evaluate_condition_with_context(
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }
-        // CR 611.2b: True when the source object is tapped.
-        StaticCondition::SourceIsTapped => {
-            state.objects.get(&source_id).is_some_and(|obj| obj.tapped)
-        }
+        // CR 611.2b + CR 110.5d: True only when the source is a tapped permanent.
+        // CR 110.5d: cards not on the battlefield are neither tapped nor untapped,
+        // regardless of their physical state — so a source that has left the
+        // battlefield (e.g. Callous Oppressor dying while tapped) fails this
+        // predicate and any `ForAsLongAs { SourceIsTapped }` continuous effect
+        // (gain-control, etc.) ends. Mirrors the battlefield-presence guard the
+        // `UntilHostLeavesPlay` arm of `gather_transient_continuous_effects` uses.
+        StaticCondition::SourceIsTapped => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield && obj.tapped),
         // CR 702.62a + CR 611.2b: True when the source object's current controller
         // equals the stored player. Drives the Suspend haste duration: when a
         // suspended creature spell resolves, a transient continuous effect with
@@ -5339,6 +5346,52 @@ mod tests {
             !effects.is_empty(),
             "effect should be gathered when source is tapped"
         );
+    }
+
+    // CR 110.5d: a tapped source that has left the battlefield is neither tapped
+    // nor untapped — `SourceIsTapped` must evaluate false once it is off-battlefield.
+    #[test]
+    fn source_is_tapped_false_when_source_off_battlefield() {
+        let mut state = setup();
+        let id = make_creature(&mut state, "Tapper", 1, 1, PlayerId(0));
+        state.objects.get_mut(&id).unwrap().tapped = true;
+
+        // On the battlefield + tapped → predicate is true, inversion is false.
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsTapped,
+            PlayerId(0),
+            id,
+        ));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            },
+            PlayerId(0),
+            id,
+        ));
+
+        // Move it off the battlefield, leaving `tapped == true` (status is stale
+        // but harmless — CR 110.5d means it is no longer tapped by rule).
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
+        assert!(state.objects.get(&id).unwrap().tapped);
+
+        // Off-battlefield → predicate false, inversion true.
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::SourceIsTapped,
+            PlayerId(0),
+            id,
+        ));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceIsTapped),
+            },
+            PlayerId(0),
+            id,
+        ));
     }
 
     // --- CR 305.7: SetBasicLandType tests ---
