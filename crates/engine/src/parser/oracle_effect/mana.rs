@@ -73,7 +73,44 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     })
 }
 
+/// CR 505.1 + CR 106.4: Recognize a leading player-subject before the mana
+/// verb so subject-led mana clauses ("the active player adds {C}{C} …", "that
+/// player adds {G}") reach the mana dispatcher. Returns the recipient
+/// `TargetFilter` and the remainder beginning at the mana symbols, with the
+/// subject's "adds" verb normalized away.
+///
+/// "the active player" is the active player whose phase began (CR 505.1) — for
+/// the Phase triggers that carry these clauses (Belbe, Corrupted Observer) the
+/// active player is the trigger's scoped player, so the recipient resolves via
+/// `TargetFilter::ScopedPlayer`. "that player" is the same anaphor.
+fn strip_mana_subject_prefix(text: &str) -> Option<(TargetFilter, &str)> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |i| {
+        value(
+            TargetFilter::ScopedPlayer,
+            (
+                alt((tag("the active player "), tag("that player "))),
+                tag("adds "),
+            ),
+        )
+        .parse(i)
+    })
+}
+
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
+    // CR 505.1 + CR 106.4: A subject-led mana clause routes the produced mana
+    // to the named player. Strip the subject, parse the bare "add …" clause,
+    // and stamp the recipient onto the resulting `Effect::Mana.target`.
+    if let Some((recipient, rest)) = strip_mana_subject_prefix(text.trim()) {
+        let synthetic = format!("add {rest}");
+        let mut effect = try_parse_add_mana_effect(&synthetic)?;
+        if let Effect::Mana { target, .. } = &mut effect {
+            if target.is_none() {
+                *target = Some(recipient);
+            }
+        }
+        return Some(effect);
+    }
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
     // Match "add " prefix via nom
@@ -556,19 +593,19 @@ pub(super) fn parse_mana_production_clause(
                 None,
             ));
         }
-        // CR 106.1: "{C} for each [filter]" -> dynamic colorless mana count
+        // CR 106.1: "{C}{C} for each [filter]" -> dynamic colorless mana count.
+        // The literal `{C}` symbol count is a per-iteration multiplier — it
+        // must NOT be discarded. `{C} for each X` yields a bare `Ref`;
+        // `{C}{C} for each X` yields `Multiply { factor: 2, inner: Ref }`
+        // (Belbe, Corrupted Observer adds two colorless per qualifying opponent).
         let remainder_lower = remainder.to_lowercase();
         if let Some((_, for_each_rest)) = nom_on_lower(remainder, &remainder_lower, |i| {
             value((), tag("for each ")).parse(i)
         }) {
             let qty = super::super::oracle_quantity::parse_for_each_clause(for_each_rest)?;
             let target = for_each_clause_target_filter(for_each_rest);
-            return Some((
-                ManaProduction::Colorless {
-                    count: QuantityExpr::Ref { qty },
-                },
-                target,
-            ));
+            let count = scale_for_each_count(colorless_count, QuantityExpr::Ref { qty });
+            return Some((ManaProduction::Colorless { count }, target));
         }
         // CR 106.1: Mixed colorless + colored: {C}{W}, {C}{C}{R}, etc.
         // (e.g. Karoo, Azorius Chancery, Grinning Ignus)
@@ -590,6 +627,21 @@ pub(super) fn parse_mana_production_clause(
     }
 
     None
+}
+
+/// CR 106.1: Combine the literal mana-symbol count with a dynamic "for each"
+/// quantity. `literal` is the `QuantityExpr::Fixed` symbol count produced by
+/// `parse_colorless_mana_production`; `dynamic` is the per-iteration quantity.
+/// `N == 1` yields the bare `dynamic` (no redundant `Multiply { factor: 1 }`);
+/// `N > 1` wraps it as `Multiply { factor: N, inner: dynamic }`.
+fn scale_for_each_count(literal: QuantityExpr, dynamic: QuantityExpr) -> QuantityExpr {
+    match literal {
+        QuantityExpr::Fixed { value } if value > 1 => QuantityExpr::Multiply {
+            factor: value,
+            inner: Box::new(dynamic),
+        },
+        _ => dynamic,
+    }
 }
 
 pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExpr, &str)> {
@@ -1985,5 +2037,56 @@ mod tests {
                 restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
             }]
         );
+    }
+
+    /// CR 505.1 + CR 106.4: a subject-led mana clause ("the active player adds
+    /// …") must reach the mana dispatcher rather than falling to Unimplemented.
+    #[test]
+    fn parse_add_mana_active_player_subject() {
+        let effect = try_parse_add_mana_effect("the active player adds {C}{C}")
+            .expect("subject-led mana clause must parse to Effect::Mana");
+        match effect {
+            Effect::Mana { target, .. } => {
+                assert_eq!(target, Some(TargetFilter::ScopedPlayer));
+            }
+            other => panic!("expected Effect::Mana, got {other:?}"),
+        }
+    }
+
+    /// CR 106.1: `{C}{C} for each X` preserves the literal symbol count as a
+    /// `Multiply` factor; `{C} for each X` emits a bare `Ref` (no `Multiply`).
+    #[test]
+    fn parse_colorless_mana_for_each_preserves_symbol_multiplier() {
+        let two = try_parse_add_mana_effect(
+            "add {C}{C} for each of your opponents who lost life this turn",
+        )
+        .expect("'{C}{C} for each' must parse");
+        match two {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => match count {
+                QuantityExpr::Multiply { factor, inner } => {
+                    assert_eq!(factor, 2);
+                    assert!(matches!(*inner, QuantityExpr::Ref { .. }));
+                }
+                other => panic!("expected Multiply, got {other:?}"),
+            },
+            other => panic!("expected colorless Mana, got {other:?}"),
+        }
+
+        let one =
+            try_parse_add_mana_effect("add {C} for each of your opponents who lost life this turn")
+                .expect("'{C} for each' must parse");
+        match one {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert!(
+                matches!(count, QuantityExpr::Ref { .. }),
+                "single {{C}} must be a bare Ref, got {count:?}"
+            ),
+            other => panic!("expected colorless Mana, got {other:?}"),
+        }
     }
 }

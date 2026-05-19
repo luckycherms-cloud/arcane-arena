@@ -155,6 +155,25 @@ fn players_for_filter(
                 .into_iter()
                 .collect()
         }
+        // CR 109.4 + CR 700.1: "each [player class] who [doesn't] control
+        // [filter]" — candidates satisfying both `relation` and the
+        // controls/controls-none predicate.
+        PlayerFilter::ControlsPermanent {
+            relation,
+            presence,
+            filter,
+        } => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::players::matches_relation(player.id, controller, *relation)
+                    && crate::game::effects::player_controls_matching_permanent(
+                        state, player.id, presence, filter, source_id,
+                    )
+            })
+            .map(|player| player.id)
+            .collect(),
     }
 }
 

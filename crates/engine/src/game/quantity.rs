@@ -2729,6 +2729,22 @@ pub(crate) fn resolve_player_count(
                         // single-player-count meaning here (no parent object
                         // target is in scope for a player-count quantity).
                         PlayerFilter::ParentObjectTargetController => false,
+                        // CR 109.4 + CR 700.1: "each [player class] who
+                        // [doesn't] control [filter]" — count candidates that
+                        // satisfy both the `relation` predicate and the
+                        // controls/controls-none predicate. Mirrors the arm in
+                        // `effects::mod::matches_player_scope` (the two copies
+                        // must stay in sync).
+                        PlayerFilter::ControlsPermanent {
+                            relation,
+                            presence,
+                            filter,
+                        } => {
+                            crate::game::players::matches_relation(p.id, controller, *relation)
+                                && crate::game::effects::player_controls_matching_permanent(
+                                    state, p.id, presence, filter, source_id,
+                                )
+                        }
                     }
             })
             .count(),
@@ -4875,6 +4891,86 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 119.2 + CR 700.1: `PlayerCount { OpponentLostLife }` counts only
+    /// opponents whose `life_lost_this_turn > 0` — Belbe's mana count base.
+    #[test]
+    fn player_count_opponent_lost_life_counts_only_damaged_opponents() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Controller (P0) and one opponent (P1) lost life; P2 did not.
+        state.players[0].life_lost_this_turn = 4;
+        state.players[1].life_lost_this_turn = 3;
+        state.players[2].life_lost_this_turn = 0;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentLostLife,
+            },
+        };
+        // Controller = P0: only P1 qualifies (P0 excluded as self, P2 lost 0).
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
+
+        // Now both opponents have lost life.
+        state.players[2].life_lost_this_turn = 1;
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
+    }
+
+    /// CR 109.4: `resolve_player_count` for `PlayerFilter::ControlsPermanent`
+    /// counts candidates by the controls / controls-none predicate. Kept in
+    /// sync with `effects::matches_player_scope`'s identical arm.
+    #[test]
+    fn resolve_player_count_controls_permanent_presence() {
+        use crate::types::ability::{ControlPresence, PlayerRelation, TypeFilter, TypedFilter};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // P1 controls an Elf; P0 and P2 control nothing.
+        let elf = create_object(
+            &mut state,
+            CardId(800),
+            PlayerId(1),
+            "Llanowar Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&elf).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+        }
+
+        let elf_filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Elf".to_string())));
+
+        // "each opponent who doesn't control an Elf" — controller P0:
+        // opponents are P1 (controls Elf → excluded) and P2 → count 1.
+        let none = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsPermanent {
+                    relation: PlayerRelation::Opponent,
+                    presence: ControlPresence::ControlsNone,
+                    filter: elf_filter.clone(),
+                },
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &none, PlayerId(0), ObjectId(1)), 1);
+
+        // "each opponent who controls an Elf" — only P1 → count 1.
+        let controls = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsPermanent {
+                    relation: PlayerRelation::Opponent,
+                    presence: ControlPresence::Controls,
+                    filter: elf_filter,
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &controls, PlayerId(0), ObjectId(1)),
+            1
+        );
     }
 
     #[test]

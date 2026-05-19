@@ -2983,8 +2983,21 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 109.4: Whether a player's controlled-permanent predicate is satisfied by
+/// the presence or the absence of a matching permanent. A typed two-variant
+/// enum — never a bool — so `PlayerFilter::ControlsPermanent` reads as
+/// self-documenting at every match site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ControlPresence {
+    /// The player controls at least one permanent matching the filter.
+    Controls,
+    /// The player controls no permanent matching the filter.
+    ControlsNone,
+}
+
 /// A filter matching players by game-state conditions.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
@@ -3052,6 +3065,16 @@ pub enum PlayerFilter {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
+    /// CR 109.4 + CR 700.1: Each player satisfying `relation` who controls
+    /// (`presence = Controls`) or does not control (`presence = ControlsNone`)
+    /// at least one permanent matching `filter`. Covers "each opponent who
+    /// controls an artifact", "each player who doesn't control a creature",
+    /// "each opponent who doesn't control an Elf" (Thornbow Archer), etc.
+    ControlsPermanent {
+        relation: PlayerRelation,
+        presence: ControlPresence,
+        filter: TargetFilter,
+    },
 }
 
 /// An expression that produces an integer for quantity comparisons.

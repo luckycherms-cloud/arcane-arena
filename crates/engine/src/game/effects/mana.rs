@@ -18,19 +18,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (produced, restrictions, grants, expiry) = match &ability.effect {
+    let (produced, restrictions, grants, expiry, mana_recipient_filter) = match &ability.effect {
         Effect::Mana {
             produced,
             restrictions,
             grants,
             expiry,
-            // CR 115.1 + CR 115.7: `target` is the spell-level player target
-            // (e.g. Jeska's Will mode 1). The actual count quantity inside
-            // `produced` references it via `TargetZoneCardCount`; we don't
-            // need it again here since `resolve_quantity_with_targets` reads
-            // `ability.targets` directly.
-            target: _,
-        } => (produced, restrictions, grants, *expiry),
+            // CR 106.4 + CR 115.1: `target` names the player whose mana pool
+            // receives the mana. For Jeska's Will mode 1 the count quantity
+            // inside `produced` references the target via `TargetZoneCardCount`;
+            // for subject-led mana clauses ("the active player adds {C}{C} …",
+            // Belbe) it is the recipient itself, resolved below.
+            target,
+        } => (produced, restrictions, grants, *expiry, target.clone()),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
     let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
@@ -88,7 +88,18 @@ pub fn resolve(
                 _ => None,
             })
             .unwrap_or(ability.controller),
-        _ => ability.controller,
+        // CR 106.4 + CR 505.1: A subject-led mana clause routes the mana to the
+        // named player ("the active player adds {C}{C} …" on a Phase trigger —
+        // the active player is the trigger's scoped player). Player-only
+        // context-ref filters (`ScopedPlayer`, …) resolve via
+        // `resolve_player_for_context_ref`; a non-player-ref `target` (Jeska's
+        // Will's `TargetZoneCardCount`) leaves the recipient as the controller.
+        _ => match &mana_recipient_filter {
+            Some(filter) if filter.is_context_ref() => {
+                super::resolve_player_for_context_ref(state, ability, filter)
+            }
+            _ => ability.controller,
+        },
     };
 
     // CR 106.4: When an effect instructs a player to add mana, that mana goes

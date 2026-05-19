@@ -66,7 +66,7 @@ pub fn build_resolved_from_def_with_targets(
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
     resolved.unless_pay = def.unless_pay.clone();
-    resolved.player_scope = def.player_scope;
+    resolved.player_scope = def.player_scope.clone();
     // CR 101.4 + CR 800.4: Propagate the turn-order override for `player_scope`
     // iteration. The iteration driver in `effects/mod.rs` reads this and calls
     // `players::apnap_order_from(state, starting_with, controller)` so Join
@@ -127,7 +127,7 @@ pub(crate) fn apply_instead_swap(
     overridden.condition = None;
     // CR 608.2 + CR 608.2c: Effect-shape fields belong to the swapped effect,
     // not the parent.
-    overridden.player_scope = sub.player_scope;
+    overridden.player_scope = sub.player_scope.clone();
     // CR 101.4 + CR 800.4: The turn-order override is an effect-shape attribute
     // (which iteration order the scoped effect uses), so it follows the swap.
     overridden.starting_with = sub.starting_with.clone();

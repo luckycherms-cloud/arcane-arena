@@ -1063,6 +1063,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
+    use crate::types::ability::{ControlPresence, PlayerRelation};
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1078,6 +1079,21 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
+        // CR 109.4 + CR 700.1: "each [player class] who [doesn't] control [filter]"
+        PlayerFilter::ControlsPermanent {
+            relation, presence, ..
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let verb = match presence {
+                ControlPresence::Controls => "who controls",
+                ControlPresence::ControlsNone => "who doesn't control",
+            };
+            return format!("{who} {verb} a matching permanent");
+        }
     }
     .into()
 }
@@ -4991,6 +5007,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
+        PlayerFilter::ControlsPermanent { .. } => ("ControlsPermanent", Handled),
     }
 }
 

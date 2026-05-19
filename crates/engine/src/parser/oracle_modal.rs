@@ -644,7 +644,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         entwine_cost: None,
         // CR 700.2e: the player who chooses the mode(s).
-        chooser: header.chooser,
+        chooser: header.chooser.clone(),
     }
 }
 

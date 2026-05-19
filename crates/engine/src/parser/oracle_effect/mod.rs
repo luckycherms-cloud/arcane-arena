@@ -10676,7 +10676,7 @@ pub(crate) fn parse_effect_chain_ir(
                 .iter()
                 .rev()
                 .find(|clause| !clause.absorbed_by_followup)
-                .and_then(|clause| clause.player_scope)
+                .and_then(|clause| clause.player_scope.clone())
         } else {
             None
         };
@@ -10697,7 +10697,7 @@ pub(crate) fn parse_effect_chain_ir(
         // creature" → controller defaults to You). Without this default, the
         // resolver would treat `controller: None` as Any and let the actor
         // sacrifice an opponent's permanent — violating CR 701.21a.
-        let chunk_actor = match (is_optional, opponent_may_scope, player_scope) {
+        let chunk_actor = match (is_optional, &opponent_may_scope, &player_scope) {
             (true, None, None) => Some(ControllerRef::You),
             (true, Some(_), _) => Some(ControllerRef::Opponent),
             (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::You),
@@ -10729,9 +10729,11 @@ pub(crate) fn parse_effect_chain_ir(
             // player" sentence (Gluntch) takes precedence — the "they"/"that
             // player controls" anaphor binds to the most recent choice.
             relative_player_scope: chain_chosen_player_scope.clone().or_else(|| {
-                ctx.relative_player_scope
-                    .clone()
-                    .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer))
+                ctx.relative_player_scope.clone().or_else(|| {
+                    player_scope
+                        .is_some()
+                        .then_some(ControllerRef::ScopedPlayer)
+                })
             }),
             // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
             // clauses already finalized — supplies the next `ChosenPlayer`
@@ -10970,7 +10972,7 @@ pub(crate) fn parse_effect_chain_ir(
         let mut clause = clause;
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
-                (&mut clause.effect, player_scope)
+                (&mut clause.effect, player_scope.clone())
             {
                 *chooser = scope;
                 player_scope = None;
@@ -11326,7 +11328,7 @@ pub(crate) fn parse_effect_chain_ir(
                 check_def.repeat_for = Some(qty.clone());
             }
             if let Some(ref scope) = player_scope {
-                check_def.player_scope = Some(*scope);
+                check_def.player_scope = Some(scope.clone());
             }
             if let Some(ref duration) = clause.duration {
                 check_def = check_def.duration(duration.clone());
@@ -11352,7 +11354,7 @@ pub(crate) fn parse_effect_chain_ir(
                 let lifted_optional = inner.optional;
                 let lifted_optional_for = inner.optional_for;
                 let lifted_repeat_for = inner.repeat_for.clone();
-                let lifted_player_scope = inner.player_scope;
+                let lifted_player_scope = inner.player_scope.clone();
                 check_def = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -11804,7 +11806,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 def.repeat_for = Some(qty.clone());
             }
         }
-        if let Some(scope) = clause_ir.player_scope {
+        if let Some(scope) = clause_ir.player_scope.clone() {
             def.player_scope = Some(scope);
         }
         // CR 101.4 + CR 800.4: Stamp the turn-order override from the chunk's
@@ -11889,7 +11891,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 let lifted_optional = inner.optional;
                 let lifted_optional_for = inner.optional_for;
                 let lifted_repeat_for = inner.repeat_for.clone();
-                let lifted_player_scope = inner.player_scope;
+                let lifted_player_scope = inner.player_scope.clone();
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -12744,6 +12746,16 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
         return (None, text.to_string());
     };
 
+    // CR 109.4 + CR 700.1: A "who [doesn't] control [type-phrase]" relative
+    // clause restricts the player set to those who do (or don't) control a
+    // matching permanent (Thornbow Archer: "each opponent who doesn't control
+    // an Elf loses 1 life"). The clause must be consumed and reflected in the
+    // scope — silently dropping it over-applies the effect to every player.
+    if let Some((controls_scope, after_clause)) = strip_controls_permanent_clause(&scope, rest) {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(controls_scope), deconjugated);
+    }
+
     // Guard: static restriction predicates ("can't", "cannot", "don't", "may only",
     // "may not") belong to the static parser, not the imperative effect pipeline.
     // Intercepting them here would produce Unimplemented instead of typed static modes.
@@ -12776,6 +12788,58 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     // Deconjugate the verb: "discards" → "discard", "draws" → "draw"
     let deconjugated = subject::deconjugate_verb(rest);
     (Some(scope), deconjugated)
+}
+
+/// CR 109.4 + CR 700.1: Strip a "who [doesn't] control [type-phrase]" relative
+/// clause that follows an "each opponent"/"each player" subject. Returns the
+/// `PlayerFilter::ControlsPermanent` scope (carrying the base subject's
+/// relation, the present/absent axis, and the controlled-permanent filter) and
+/// the verb-phrase remainder. Returns `None` when no control clause is present.
+///
+/// The object sub-phrase ("an Elf") delegates to the shared `parse_type_phrase`
+/// combinator — no bespoke string matching.
+fn strip_controls_permanent_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::{ControlPresence, PlayerRelation};
+    // The base subject only contributes its player relation; HighestSpeed and
+    // any non-relational base are out of scope for a controls qualifier.
+    let relation = match base {
+        PlayerFilter::Opponent => PlayerRelation::Opponent,
+        PlayerFilter::All => PlayerRelation::All,
+        _ => return None,
+    };
+    let lower = rest.to_lowercase();
+    // "who controls " / "who doesn't control " — one alt() arm per presence axis.
+    let (presence, after_verb) = nom_on_lower(rest, &lower, |i| {
+        preceded(
+            tag("who "),
+            alt((
+                value(ControlPresence::ControlsNone, tag("doesn't control ")),
+                value(ControlPresence::ControlsNone, tag("does not control ")),
+                value(ControlPresence::Controls, tag("controls ")),
+            )),
+        )
+        .parse(i)
+    })?;
+    // The object sub-phrase is consumed by the shared type-phrase combinator.
+    let (filter, remainder) = super::oracle_target::parse_type_phrase(after_verb);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() {
+        return None;
+    }
+    Some((
+        PlayerFilter::ControlsPermanent {
+            relation,
+            presence,
+            filter,
+        },
+        verb_phrase.to_string(),
+    ))
 }
 
 fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String) {
@@ -25078,6 +25142,45 @@ mod tests {
             strip_player_scope_subject("the exiled card's owner creates an X/X token");
         assert_eq!(scope, Some(PlayerFilter::OwnersOfCardsExiledBySource));
         assert_eq!(result, "create an X/X token");
+    }
+
+    /// CR 109.4 + CR 700.1: a "who [doesn't] control [type]" relative clause
+    /// must be captured into `PlayerFilter::ControlsPermanent`, not dropped
+    /// (Thornbow Archer: "each opponent who doesn't control an Elf loses 1 life").
+    #[test]
+    fn strip_each_player_subject_controls_permanent_clause() {
+        use crate::types::ability::{ControlPresence, PlayerRelation};
+
+        let (scope, result) =
+            strip_each_player_subject("each opponent who doesn't control an Elf loses 1 life");
+        assert_eq!(result, "lose 1 life");
+        match scope {
+            Some(PlayerFilter::ControlsPermanent {
+                relation,
+                presence,
+                filter,
+            }) => {
+                assert_eq!(relation, PlayerRelation::Opponent);
+                assert_eq!(presence, ControlPresence::ControlsNone);
+                assert!(
+                    !matches!(filter, TargetFilter::Any),
+                    "Elf filter must be captured, got {filter:?}"
+                );
+            }
+            other => panic!("expected ControlsPermanent scope, got {other:?}"),
+        }
+
+        // The affirmative form maps to `ControlPresence::Controls`.
+        let (scope, _) =
+            strip_each_player_subject("each player who controls a creature draws a card");
+        assert!(matches!(
+            scope,
+            Some(PlayerFilter::ControlsPermanent {
+                relation: PlayerRelation::All,
+                presence: ControlPresence::Controls,
+                ..
+            })
+        ));
     }
 
     #[test]

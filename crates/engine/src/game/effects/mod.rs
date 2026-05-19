@@ -263,8 +263,52 @@ pub(crate) fn matches_player_scope(
                     // `speed_effects::players_for_filter` instead, which has
                     // the ability in scope. Unreachable here.
                     PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
+                    // control [filter]" — the candidate must satisfy both the
+                    // `relation` predicate and the controls/controls-none
+                    // predicate over the permanents they control.
+                    PlayerFilter::ControlsPermanent {
+                        relation,
+                        presence,
+                        filter,
+                    } => {
+                        crate::game::players::matches_relation(p.id, controller, *relation)
+                            && player_controls_matching_permanent(
+                                state, p.id, presence, filter, source_id,
+                            )
+                    }
                 }
         })
+}
+
+/// CR 109.4: Evaluate the controls / controls-none predicate of
+/// `PlayerFilter::ControlsPermanent` for one candidate player. Counts
+/// battlefield permanents the candidate controls that match `filter`;
+/// `Controls` requires at least one, `ControlsNone` requires zero.
+///
+/// The `filter` ("an Elf", "an artifact", …) carries no controller axis — the
+/// control relationship is enforced here by `obj.controller == player`, so the
+/// shared `matches_target_filter` evaluates only the printed object qualities.
+pub(crate) fn player_controls_matching_permanent(
+    state: &GameState,
+    player: PlayerId,
+    presence: &crate::types::ability::ControlPresence,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> bool {
+    use crate::types::ability::ControlPresence;
+    let ctx = filter::FilterContext::from_source_with_controller(source_id, player);
+    let controls_any = state.battlefield.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.controller == player)
+            && filter::matches_target_filter(state, *id, filter, &ctx)
+    });
+    match presence {
+        ControlPresence::Controls => controls_any,
+        ControlPresence::ControlsNone => !controls_any,
+    }
 }
 
 /// Record the outer effect's `EffectKind` on the current `pending_continuation`

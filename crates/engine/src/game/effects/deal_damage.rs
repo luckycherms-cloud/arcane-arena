@@ -671,7 +671,7 @@ pub fn resolve_all(
             amount,
             target,
             player_filter,
-        } => (amount, target.clone(), *player_filter),
+        } => (amount, target.clone(), player_filter.clone()),
         _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
     };
     // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
@@ -844,6 +844,19 @@ fn collect_matching_players(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
+                    // control [filter]" — candidate satisfies both `relation`
+                    // and the controls/controls-none predicate.
+                    PlayerFilter::ControlsPermanent {
+                        ref relation,
+                        ref presence,
+                        ref filter,
+                    } => {
+                        crate::game::players::matches_relation(p.id, source_controller, *relation)
+                            && crate::game::effects::player_controls_matching_permanent(
+                                state, p.id, presence, filter, source_id,
+                            )
+                    }
                 }
         })
         .map(|p| p.id)
@@ -862,7 +875,7 @@ pub fn resolve_each_player(
         Effect::DamageEachPlayer {
             amount,
             player_filter,
-        } => (amount, *player_filter),
+        } => (amount, player_filter.clone()),
         _ => {
             return Err(EffectError::MissingParam(
                 "DamageEachPlayer amount".to_string(),
@@ -951,6 +964,23 @@ pub fn resolve_each_player(
                     // for a damage-each-player effect (no parent object target
                     // is in scope); never matches.
                     PlayerFilter::ParentObjectTargetController => false,
+                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
+                    // control [filter]" — candidate satisfies both `relation`
+                    // and the controls/controls-none predicate.
+                    PlayerFilter::ControlsPermanent {
+                        relation,
+                        presence,
+                        filter,
+                    } => {
+                        crate::game::players::matches_relation(p.id, ability.controller, *relation)
+                            && crate::game::effects::player_controls_matching_permanent(
+                                state,
+                                p.id,
+                                presence,
+                                filter,
+                                ability.source_id,
+                            )
+                    }
                 }
         })
         .map(|p| p.id)

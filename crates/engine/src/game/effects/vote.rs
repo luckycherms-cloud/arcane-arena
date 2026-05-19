@@ -218,7 +218,7 @@ pub fn resolve_tally(
         // The two paths must be mutually exclusive: stacking `player_scope`
         // and `repeat_for` would multiply iterations (N voters × N votes) and
         // break tally fan-out semantics.
-        let per_choice_player_scope = per_choice_effect[idx].player_scope;
+        let per_choice_player_scope = per_choice_effect[idx].player_scope.clone();
         let repeat_for = if per_choice_player_scope.is_some() {
             None
         } else {

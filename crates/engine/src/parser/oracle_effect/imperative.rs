@@ -4261,7 +4261,24 @@ pub(super) fn parse_cost_resource_ast(
             });
         }
     }
-    if nom_on_lower(text, lower, |input| value((), tag("add ")).parse(input)).is_some() {
+    // CR 106.4 + CR 505.1: Dispatch to the mana detector for a bare "add …"
+    // clause OR a subject-led mana clause ("the active player adds …", "that
+    // player adds …") — `try_parse_add_mana_effect` strips the subject itself.
+    if nom_on_lower(text, lower, |input| {
+        alt((
+            value((), tag("add ")),
+            value(
+                (),
+                (
+                    alt((tag("the active player "), tag("that player "))),
+                    tag("adds "),
+                ),
+            ),
+        ))
+        .parse(input)
+    })
+    .is_some()
+    {
         return match try_parse_add_mana_effect(text) {
             Some(Effect::Mana {
                 produced,

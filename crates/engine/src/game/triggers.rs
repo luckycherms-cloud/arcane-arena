@@ -2654,6 +2654,10 @@ pub(crate) fn check_trigger_condition(
             | PlayerFilter::VotedFor { .. }
             | PlayerFilter::OwnersOfCardsExiledBySource
             | PlayerFilter::ParentObjectTargetController
+            // CR 102.1: a controls-a-permanent population predicate is
+            // set-valued — it has no single-player "whose turn" semantic.
+            // Fail-closed alongside the other set-valued variants.
+            | PlayerFilter::ControlsPermanent { .. }
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.

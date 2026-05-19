@@ -843,6 +843,30 @@ fn parse_number_of_opponents(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
+/// CR 119.3 + CR 700.1: Parse a "for each" opponent clause qualified by a
+/// life-change predicate — "(of your) opponents who lost/gained life this
+/// turn". Reached by the for-each clause path (Belbe, Corrupted Observer:
+/// "{C}{C} for each of your opponents who lost life this turn"). The leading
+/// "of your "/"of " is optional. Each qualifier is one `alt()` arm — no
+/// permutation enumeration.
+fn parse_for_each_opponents_life_change(input: &str) -> OracleResult<'_, QuantityRef> {
+    use crate::types::ability::PlayerFilter;
+    let (rest, _) = opt(alt((tag("of your "), tag("of ")))).parse(input)?;
+    let (rest, _) = tag("opponents ").parse(rest)?;
+    let (rest, filter) = alt((
+        value(
+            PlayerFilter::OpponentLostLife,
+            tag("who lost life this turn"),
+        ),
+        value(
+            PlayerFilter::OpponentGainedLife,
+            tag("who gained life this turn"),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::PlayerCount { filter }))
+}
+
 /// Parse "your life total".
 fn parse_life_total_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
@@ -1549,6 +1573,7 @@ fn parse_for_each_clause_ref_with_they_controller(
     they_controller: ControllerRef,
 ) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_for_each_opponents_life_change,
         parse_counter_added_this_turn_for_each,
         parse_object_colors_for_each,
         parse_object_name_word_count_for_each,

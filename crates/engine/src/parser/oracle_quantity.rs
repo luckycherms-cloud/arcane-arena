@@ -2694,4 +2694,26 @@ mod tests {
         let result = parse_for_each_clause_expr("card in your hand and each blorgon you control");
         assert_eq!(result, None);
     }
+
+    /// CR 119.3 + CR 700.1: "for each of your opponents who lost life this
+    /// turn" → `PlayerCount { OpponentLostLife }` (Belbe, Corrupted Observer).
+    #[test]
+    fn parse_for_each_opponents_who_lost_life() {
+        let qty = parse_for_each_clause("of your opponents who lost life this turn")
+            .expect("for-each opponent-lost-life clause must parse");
+        assert_eq!(
+            qty,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentLostLife,
+            }
+        );
+        let gained = parse_for_each_clause("opponents who gained life this turn")
+            .expect("for-each opponent-gained-life clause must parse");
+        assert_eq!(
+            gained,
+            QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentGainedLife,
+            }
+        );
+    }
 }
