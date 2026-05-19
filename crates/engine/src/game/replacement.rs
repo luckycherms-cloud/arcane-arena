@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementMode, ShieldKind,
-    TargetFilter, TargetRef,
+    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -110,14 +110,20 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         .unwrap_or_else(|| "Accept".to_string());
                     vec![accept_desc, "Decline".to_string()]
                 } else {
+                    // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
+                    // outcome-descriptive label derived from its `execute`
+                    // effect. `map` (not `filter_map`) guarantees the vec is
+                    // never shorter than `candidate_count`, so the frontend
+                    // index lookup stays aligned.
                     p.candidates
                         .iter()
-                        .filter_map(|rid| {
+                        .map(|rid| {
                             state
                                 .objects
                                 .get(&rid.source)
                                 .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                                .and_then(|repl| repl.description.clone())
+                                .map(replacement_choice_label)
+                                .unwrap_or_else(|| "Replacement effect".to_string())
                         })
                         .collect()
                 };
@@ -173,6 +179,45 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::EffectCost { .. }
         | AbilityCost::Unimplemented { .. } => "Pay cost".to_string(),
+    }
+}
+
+/// CR 616.1 / CR 614.1c / CR 614.1d: Outcome-descriptive label for one
+/// candidate in a competing-replacement (distinct, non-optional) choice.
+/// Derived from the replacement's own `execute` effect so the label states
+/// the *result* of selecting it, not the source card's Oracle text.
+///
+/// NOTE: unlike the sibling `replacement_cost_description` (which is a
+/// fully-exhaustive `match` on `AbilityCost` with no wildcard, so a new
+/// cost variant forces a deliberate decision), this helper is
+/// INTENTIONALLY non-exhaustive: only the `EnterTapped`-writing effect
+/// class produces a multi-candidate distinct-replacement CR 616.1 choice
+/// that benefits from an outcome label. Every other `Effect` falls through
+/// the `_ =>` arm to the raw-text fallback by design — do not "fix" this
+/// into an exhaustive match.
+fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
+    let fallback = || {
+        repl.description
+            .clone()
+            .unwrap_or_else(|| "Replacement effect".to_string())
+    };
+    match &repl.execute {
+        // The effect is `Box`-wrapped; deref to match, mirroring
+        // `event_modifiers_for_ability` (`&*def.effect`).
+        Some(ability) => match &*ability.effect {
+            // CR 614.1c / CR 614.1d: a SelfRef tap/untap is exactly the
+            // enters-tapped modifier class. The `target: TargetFilter::SelfRef`
+            // constraint is load-bearing — a non-SelfRef tap is not an
+            // enters-tapped modifier and must fall through to raw text.
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            } => "Enters tapped".to_string(),
+            Effect::Untap {
+                target: TargetFilter::SelfRef,
+            } => "Enters untapped".to_string(),
+            _ => fallback(),
+        },
+        None => fallback(),
     }
 }
 
@@ -4269,6 +4314,126 @@ mod tests {
             state.post_replacement_continuation.is_some(),
             "the as-enters color Choose should be stashed as a post-replacement continuation"
         );
+    }
+
+    #[test]
+    fn replacement_choice_label_derives_outcome_from_execute_effect() {
+        // Building-block test for `replacement_choice_label` across its input
+        // range, including the SelfRef boundary (R1).
+        let tap =
+            ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        assert_eq!(replacement_choice_label(&tap), "Enters tapped");
+
+        let untap =
+            ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        assert_eq!(replacement_choice_label(&untap), "Enters untapped");
+
+        // A non-SelfRef tap is NOT an enters-tapped modifier — must fall
+        // through to the raw-text fallback (proves the SelfRef constraint).
+        let non_self_tap = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::Any,
+                },
+            ))
+            .description("X".to_string());
+        assert_eq!(replacement_choice_label(&non_self_tap), "X");
+
+        // An unrecognized effect falls through to the raw-text fallback.
+        let other = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: GainLifePlayer::Controller,
+                },
+            ))
+            .description("X".to_string());
+        assert_eq!(replacement_choice_label(&other), "X");
+
+        // No `execute` and no `description` → non-empty generic fallback so
+        // the candidate vec is never shorter than `candidate_count`.
+        let bare = ReplacementDefinition::new(ReplacementEvent::Moved);
+        assert_eq!(replacement_choice_label(&bare), "Replacement effect");
+    }
+
+    #[test]
+    fn competing_enter_tap_replacements_get_outcome_labels() {
+        // Issue #505: two competing distinct `Moved` ETB replacements — one
+        // `Untap SelfRef` ("lands you control enter untapped", Horizon
+        // Explorer) and one `Tap SelfRef` (a tapland's own "enters tapped").
+        // They both write `enter_tapped`, so CR 616.1 pops a distinct-
+        // replacement choice. The two option labels must state the *outcome*
+        // ("Enters tapped" / "Enters untapped"), not raw Oracle text.
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description("Lands you control enter untapped.".to_string());
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .description("This land enters the battlefield tapped.".to_string());
+        let mut state =
+            test_state_with_object(ObjectId(10), Zone::Hand, vec![untap_repl, tap_repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(PlayerId(0))),
+            "two competing enter-tap replacements must pop a CR 616.1 choice, got {result:?}"
+        );
+
+        let WaitingFor::ReplacementChoice {
+            candidate_count,
+            candidate_descriptions,
+            ..
+        } = replacement_choice_waiting_for(PlayerId(0), &state)
+        else {
+            panic!("expected ReplacementChoice waiting_for");
+        };
+        assert_eq!(candidate_count, 2);
+        // After `filter_map`→`map` the vec length equals `candidate_count` by
+        // construction (`map` cannot drop elements); this is a weak guard —
+        // the label-set assertion below is the real regression discriminator.
+        assert_eq!(candidate_descriptions.len(), 2);
+        let labels: HashSet<&str> = candidate_descriptions.iter().map(String::as_str).collect();
+        assert_eq!(
+            labels,
+            HashSet::from(["Enters tapped", "Enters untapped"]),
+            "labels must be outcome-descriptive, not raw Oracle text"
+        );
+        for label in &candidate_descriptions {
+            assert!(!label.is_empty(), "no label may be empty");
+            assert!(
+                !label.contains("Lands you control"),
+                "label must not be a raw Oracle-text blob: {label:?}"
+            );
+        }
     }
 
     #[test]
