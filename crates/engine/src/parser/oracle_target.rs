@@ -581,6 +581,36 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
             return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
         }
+        // CR 903.3 + CR 108.3: "target commander[s] <ownership-or-controller suffix>" —
+        // Sanctum of Eternity ("target commander you own"), Command Beacon
+        // counterpart, Bloodline Pretender variants. The commander is identified
+        // by the `IsCommander` flag, not a card subtype, so `parse_type_phrase`
+        // wouldn't classify it. Ownership ("you own") and control ("they
+        // control") are distinct CR 903.3 concepts here, so dispatch through
+        // `parse_ownership_or_controller_suffix` to capture both.
+        if let Ok((after_commander, _)) =
+            alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(after_target)
+        {
+            let mut properties = vec![FilterProp::IsCommander];
+            let mut controller: Option<ControllerRef> = None;
+            let suffix_len = parse_ownership_or_controller_suffix(
+                after_commander,
+                &mut properties,
+                &mut controller,
+                ctx,
+            );
+            if suffix_len > 0 {
+                let consumed = lower.len() - after_commander.len() + suffix_len;
+                return (
+                    TargetFilter::Typed(TypedFilter {
+                        controller,
+                        properties,
+                        ..Default::default()
+                    }),
+                    &text[consumed..],
+                );
+            }
+        }
         // "target" + type phrase (generic)
         let (filter, rest) = parse_type_phrase_with_ctx(&text[target_offset..], ctx);
         let consumed_end = lower.len() - rest.len();
@@ -1057,19 +1087,30 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
-    // Bare commander reference with a controller suffix ("commander they
-    // control", "commanders target player controls"). This is the non-possessive
-    // companion to the commander reference above and must not synthesize a
-    // Commander subtype.
+    // Bare commander reference with a controller OR ownership suffix
+    // ("commander they control", "commanders target player controls",
+    // "commander you own" / "commander an opponent owns"). Non-possessive
+    // companion to the commander reference above; must not synthesize a
+    // Commander subtype. CR 903.3 + CR 108.3: ownership is distinct from
+    // control here — Sanctum of Eternity targets the commander you OWN
+    // regardless of who currently controls it.
     if let Ok((after_commander, _)) =
         alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(lower.as_str())
     {
-        if let Some((ctrl, ctrl_len)) = parse_controller_suffix(after_commander, ctx) {
-            let consumed = lower.len() - after_commander.len() + ctrl_len;
+        let mut properties = vec![FilterProp::IsCommander];
+        let mut controller: Option<ControllerRef> = None;
+        let suffix_len = parse_ownership_or_controller_suffix(
+            after_commander,
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
+        if suffix_len > 0 {
+            let consumed = lower.len() - after_commander.len() + suffix_len;
             return (
                 TargetFilter::Typed(TypedFilter {
-                    controller: Some(ctrl),
-                    properties: vec![FilterProp::IsCommander],
+                    controller,
+                    properties,
                     ..Default::default()
                 }),
                 &text[consumed..],
@@ -4502,6 +4543,33 @@ mod tests {
             TargetFilter::Typed(TypedFilter {
                 controller: Some(ControllerRef::TargetPlayer),
                 properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest, " from the battlefield");
+    }
+
+    /// CR 903.3 + CR 108.3: Sanctum of Eternity — "target commander you own
+    /// from the battlefield" must lower to `Typed{IsCommander, Owned{You}}`,
+    /// distinct from the controller-suffix variant ("commander they control"
+    /// → controller=TargetPlayer, no Owned). Ownership and control are not
+    /// interchangeable here: an opponent-controlled, you-owned commander
+    /// must still match. Regression discriminator for #608: before the fix,
+    /// "target commander you own" fell through to `parse_type_phrase` and
+    /// emitted an empty Typed filter that matched any permanent.
+    #[test]
+    fn target_commander_you_own_lowers_to_is_commander_plus_owned_you() {
+        let (f, rest) = parse_target("target commander you own from the battlefield");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ],
                 ..Default::default()
             })
         );
