@@ -1020,7 +1020,7 @@ pub(super) fn parse_targeted_action_ast(
         // `rewrite_player_scope_refs` rewrites that target-scoped hand-size to
         // `ScopedPlayer`, so Windfall-style effects bind to the iterating
         // player instead of the caster.
-        if let Ok((_, hand_owner)) = preceded(
+        if let Ok((_, hand_owner)) = terminated(
             alt((
                 value(
                     PlayerScope::Controller,

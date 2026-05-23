@@ -526,7 +526,10 @@ const POSSESSIVES: &[&str] = &[
 
 /// Object pronouns in MTG Oracle text that refer to previously-mentioned objects.
 /// Used in anaphoric references like "shuffle it into", "put them onto", "exile that card".
-pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards"];
+/// `"~"` is the card-name placeholder (normalized from the card's own name by the Oracle
+/// pre-processor) and acts as an object pronoun in self-shuffle effects like "shuffle ~
+/// into its owner's library" (Zenith cycle, Fblthp, etc.).
+pub const OBJECT_PRONOUNS: &[&str] = &["it", "them", "that card", "those cards", "~"];
 
 /// Object-style references that include both anaphoric pronouns (`OBJECT_PRONOUNS`)
 /// and the self-reference token `~` produced by `normalize_card_name_refs`.
@@ -2486,6 +2489,13 @@ mod tests {
         ));
         assert!(!contains_object_pronoun(
             "shuffle your into",
+            "shuffle",
+            "into"
+        ));
+        // CR 201.5: "~" is the card-name placeholder used in self-shuffle effects
+        // (e.g. "shuffle ~ into its owner's library" — Black Sun's Zenith, Zenith cycle).
+        assert!(contains_object_pronoun(
+            "shuffle ~ into its owner's library",
             "shuffle",
             "into"
         ));

@@ -216,7 +216,7 @@ pub(super) fn record_loyalty_activation(state: &mut GameState, pw_id: ObjectId, 
     if let Some(obj) = state.objects.get_mut(&pw_id) {
         obj.loyalty_activations_this_turn = obj.loyalty_activations_this_turn.saturating_add(1);
     }
-    *state
+    state
         .loyalty_abilities_activated_this_turn
         .entry(player)
         .and_modify(|count| *count = count.saturating_add(1))
