@@ -305,11 +305,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       "ring-2 ring-white shadow-[0_0_8px_2px_rgba(255,255,255,0.6)]";
   }
 
-  const sicknessFilter = hasSummoningSickness ? "saturate(50%)" : undefined;
-  const sicknessGlow = hasSummoningSickness
-    ? "0 0 6px 1px rgba(255,255,255,0.3)"
-    : undefined;
-
   // CR 702.26: Per-permanent phasing — phased-out permanents stay on the
   // battlefield but are treated as though they don't exist (CR 702.26d). We
   // surface this with the same sky-blue "ethereal plane" tint used for
@@ -449,11 +444,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
       data-object-id={objectId}
       data-card-hover
       layoutId={`permanent-${objectId}`}
-      className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
+      className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"
       style={{
         zIndex: attachmentsLifted ? HOVERED_ATTACHMENT_HOST_Z_INDEX : hoveredObjectId === objectId ? HOVERED_CARD_Z_INDEX : isAttacking ? 50 : undefined,
-        filter: sicknessFilter,
-        boxShadow: sicknessGlow,
         transformOrigin: "center center",
         // Reserve space below for exile ghost cards
         marginBottom:
@@ -614,6 +607,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         </>
       )}
 
+      {hasSummoningSickness && (
+        <SummoningSicknessOverlay variant={useArtCrop ? "artCrop" : "fullCard"} />
+      )}
+
       {glowClass && (
         <div
           aria-hidden
@@ -643,6 +640,16 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
         />
       )}
     </motion.div>
+  );
+});
+
+const SummoningSicknessOverlay = memo(function SummoningSicknessOverlay({ variant }: { variant: "artCrop" | "fullCard" }) {
+  return (
+    <div
+      aria-hidden
+      data-summoning-sickness-underwater="true"
+      className={`summoning-sickness-underwater summoning-sickness-underwater--${variant}`}
+    />
   );
 });
 
