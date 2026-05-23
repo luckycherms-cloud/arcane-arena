@@ -21,7 +21,7 @@ export interface ServerPreset {
  * .planning/lobby-failover-federation-plan.md.
  */
 export const SERVER_PRESETS: ServerPreset[] = [
-  { label: "US (default)", url: "wss://us.phase-rs.dev/ws", flag: "us" },
+  { label: "Official", url: "wss://lobby.phase-rs.dev/ws", flag: "us" },
 ];
 
 /** The default region's URL — first entry in {@link SERVER_PRESETS}. */
