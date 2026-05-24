@@ -5362,6 +5362,34 @@ fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -
     }
 }
 
+fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) -> bool {
+    match counter_type {
+        CounterType::Plus1Plus1 => lower.contains("+1/+1 counter"),
+        CounterType::Minus1Minus1 => lower.contains("-1/-1 counter"),
+        CounterType::PowerToughness { power, toughness } => lower.contains(&format!(
+            "{}{}/{}{} counter",
+            if *power >= 0 { "+" } else { "" },
+            power,
+            if *toughness >= 0 { "+" } else { "" },
+            toughness
+        )),
+        CounterType::Keyword(kind) => {
+            let needle = format!("{kind:?} counter").to_lowercase();
+            lower.contains(&needle)
+        }
+        CounterType::Loyalty
+        | CounterType::Defense
+        | CounterType::Stun
+        | CounterType::Lore
+        | CounterType::Time
+        | CounterType::Age
+        | CounterType::Generic(_) => {
+            let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
+            lower.contains(&needle)
+        }
+    }
+}
+
 /// A semantic finding detected during audit of a card's parsed data vs Oracle text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -6466,7 +6494,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // Covers "damage can't be prevented" (AddRestriction/DamagePreventionDisabled),
         // "you may cast ... from" (CastFromZone), and similar patterns where the parser
         // produces the correct effect but doesn't attach a description string.
-        let ability_effect_type_matches: Vec<&AbilityDefinition> = {
+        let (ability_effect_type_matches, trigger_effect_type_matches): (
+            Vec<&AbilityDefinition>,
+            Vec<&AbilityDefinition>,
+        ) = {
             let line_matches_effect_type = |d: &AbilityDefinition| match &*d.effect {
                 Effect::AddRestriction { restriction, .. } => {
                     matches!(
@@ -6489,6 +6520,39 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
                 }
+                Effect::Mana { .. } => effective_lower.contains("add "),
+                Effect::PutCounter {
+                    counter_type: ct, ..
+                }
+                | Effect::PutCounterAll {
+                    counter_type: ct, ..
+                } => {
+                    effective_lower.contains("put")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("remove")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::RemoveCounter {
+                    counter_type: None, ..
+                } => effective_lower.contains("remove") && effective_lower.contains("counter"),
+                Effect::MoveCounters {
+                    counter_type: Some(ct),
+                    ..
+                } => {
+                    effective_lower.contains("move")
+                        && effective_lower.contains("counter")
+                        && oracle_line_mentions_counter_type(&effective_lower, ct)
+                }
+                Effect::MoveCounters {
+                    counter_type: None, ..
+                } => effective_lower.contains("move") && effective_lower.contains("counter"),
                 Effect::PayCost { .. } => {
                     // "You may pay {X} rather than pay ..." — alternative cost patterns
                     effective_lower.contains("rather than pay")
@@ -6524,12 +6588,22 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 }
                 _ => false,
             };
-            face.abilities
+            let ability_matches = face
+                .abilities
                 .iter()
                 .filter(|a| ability_tree_any(a, &line_matches_effect_type))
-                .collect()
+                .collect();
+            let trigger_matches = face
+                .triggers
+                .iter()
+                .filter_map(|t| t.execute.as_ref())
+                .map(Box::as_ref)
+                .filter(|a| ability_tree_any(a, &line_matches_effect_type))
+                .collect();
+            (ability_matches, trigger_matches)
         };
-        let covered_by_ability_effect_type = !ability_effect_type_matches.is_empty();
+        let covered_by_ability_effect_type =
+            !ability_effect_type_matches.is_empty() || !trigger_effect_type_matches.is_empty();
 
         // Replacement effects matched by event type when description doesn't align.
         // Covers "prevent ... damage", "enters with ... counter", damage redirection,
@@ -6679,6 +6753,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         let covered_ability_effect_type_any = |pred: &dyn Fn(&AbilityDefinition) -> bool| -> bool {
             ability_effect_type_matches
                 .iter()
+                .chain(trigger_effect_type_matches.iter())
                 .any(|a| ability_tree_any(a, &|d| pred(d)))
         };
         // 1. Condition check: does Oracle text contain condition language?
@@ -6776,6 +6851,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     } else {
                         matched.iter().any(|e| e.has_counter_effect(&normalized))
                             || modal_any(&|d: &AbilityDefinition| {
+                                ability_places_counter(d, &normalized)
+                            })
+                            || covered_ability_effect_type_any(&|d: &AbilityDefinition| {
                                 ability_places_counter(d, &normalized)
                             })
                     };
@@ -8991,6 +9069,63 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "Should accept counters folded into token enter_with_counters: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_accepts_descriptionless_counter_trigger_and_mana_sub_ability() {
+        let mut face = make_face();
+        let oracle =
+            "At the beginning of your upkeep, remove a depletion counter from this land.\n\
+            {T}: Add {W} or {U}. Put a depletion counter on this land.";
+        face.name = "Land Cap".to_string();
+        face.oracle_text = Some(oracle.to_string());
+
+        let remove_counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: Some(CounterType::Generic("depletion".to_string())),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            },
+        );
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::Phase)
+                .execute(remove_counter)
+                .description("At the beginning of your upkeep".to_string()),
+        );
+
+        let mut mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: vec![ManaColor::White, ManaColor::Blue],
+                    contribution: crate::types::ability::ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        mana.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("depletion".to_string()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        face.abilities.push(mana);
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "Descriptionless counter trigger and mana sub-ability should be covered: {findings:?}"
         );
     }
 
