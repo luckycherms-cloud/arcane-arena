@@ -508,6 +508,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player,
                 valid_blocker_ids,
                 valid_block_targets,
+                ..
             },
             GameAction::DeclareBlockers { assignments },
         ) => {

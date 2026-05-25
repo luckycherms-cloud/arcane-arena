@@ -1427,6 +1427,14 @@ pub enum WaitingFor {
         valid_blocker_ids: Vec<ObjectId>,
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
+        /// CR 702.111b (Menace) + CR 509.1b: per-attacker minimum-blocker count
+        /// for attackers requiring more than one blocker. Lets the UI surface
+        /// "needs N blockers" feedback and guard confirmation; attackers with
+        /// the trivial requirement of 1 are omitted. Computed by
+        /// `combat::block_requirements_for_player` — the same authority that
+        /// enforces the requirement in `validate_blocks`.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        block_requirements: HashMap<ObjectId, u32>,
     },
     /// CR 502.3: During the untap step, the active player may choose not to
     /// untap permanents with "You may choose not to untap..." static abilities.
@@ -4931,6 +4939,7 @@ mod tests {
             player: PlayerId(0),
             valid_blocker_ids: vec![],
             valid_block_targets: HashMap::new(),
+            block_requirements: HashMap::new(),
         }));
         variants.push(Box::new(WaitingFor::GameOver {
             winner: Some(PlayerId(0)),

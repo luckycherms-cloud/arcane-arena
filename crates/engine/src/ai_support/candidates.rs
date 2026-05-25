@@ -516,6 +516,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_blocker_ids,
             valid_block_targets,
+            ..
         } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
         WaitingFor::UntapChoice {
             player, candidates, ..
