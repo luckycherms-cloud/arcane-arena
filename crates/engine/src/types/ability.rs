@@ -100,6 +100,25 @@ pub enum SearchSelectionConstraint {
     MatchEachFilter { filters: Vec<TargetFilter> },
 }
 
+/// CR 400.11 + CR 406.3: Candidate pool for outside-game searches. The
+/// baseline pool is the player's sideboard; Karn/Coax-class text widens that
+/// pool to include owned face-up exile cards that match the same filter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum OutsideGameSourcePool {
+    /// CR 400.11a: Tournament sideboard / casual outside-the-game collection.
+    #[default]
+    Sideboard,
+    /// CR 400.11a + CR 406.3: Sideboard plus matching owned face-up exile.
+    SideboardAndFaceUpExile,
+}
+
+impl OutsideGameSourcePool {
+    pub fn includes_face_up_exile(self) -> bool {
+        matches!(self, OutsideGameSourcePool::SideboardAndFaceUpExile)
+    }
+}
+
 /// CR 701.23a + CR 608.2c: A search whose found set is partitioned between two
 /// destinations — e.g. Cultivate ("put one onto the battlefield tapped and the
 /// other into your hand"). `primary_count` cards go to `primary_destination`
@@ -5636,6 +5655,9 @@ pub enum Effect {
     /// CR 400.11/400.11a + CR 701.23j: Choose card(s) the player owns from
     /// outside the game. For tournament-style play, the bounded accessible set
     /// is the player's current sideboard, which is not modeled as a zone.
+    ///
+    /// CR 400.11 + CR 406.3: Candidate source pool. Defaults to sideboard;
+    /// Karn/Coax-class text widens the pool to include owned face-up exile.
     SearchOutsideGame {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
@@ -5644,6 +5666,8 @@ pub enum Effect {
         reveal: bool,
         #[serde(default = "default_zone_hand")]
         destination: Zone,
+        #[serde(default, skip_serializing_if = "is_default_outside_game_source_pool")]
+        source_pool: OutsideGameSourcePool,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -6568,6 +6592,10 @@ fn is_default_damage_aggregate(a: &AggregateFunction) -> bool {
 
 fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
     matches!(c, SearchSelectionConstraint::None)
+}
+
+fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {
+    matches!(pool, OutsideGameSourcePool::Sideboard)
 }
 
 fn default_zone_hand() -> Zone {
