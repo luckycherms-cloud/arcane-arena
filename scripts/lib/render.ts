@@ -39,42 +39,80 @@ function formatReport(r: ReportItem, index: number): string {
 }
 
 export function renderTriageDashboard(items: TriageItem[]): string {
-  // The script does not classify; this dashboard renders the raw triage items
-  // grouped by thread so the LLM operator (running /bug-triage) can scan and
-  // bucket. No heuristic actionable/needs-review/skipped splits.
   const now = new Date().toISOString();
   const lines: string[] = [];
 
   lines.push(`# Triage Dashboard`);
   lines.push(`_Generated: ${now}_`);
   lines.push(``);
-  lines.push(`Total items: ${items.length}`);
-  lines.push(``);
-  lines.push(`> Classification is the LLM's responsibility. Run /bug-triage to`);
-  lines.push(`> classify these items via bug-coverage-classifier and your own judgement.`);
-  lines.push(``);
 
-  // Group items by thread and sort threads alphabetically for stable diffs.
-  const byThread = new Map<string, TriageItem[]>();
-  for (const item of items) {
-    if (!byThread.has(item.thread_id)) byThread.set(item.thread_id, []);
-    byThread.get(item.thread_id)!.push(item);
+  // --- Actionable bugs ---
+  const actionable = items.filter((i) => i.proposed_action === "create_issue");
+  const byDedupGroup = new Map<string, TriageItem[]>();
+  for (const item of actionable) {
+    const key = item.dedup_group ?? "(no card)";
+    if (!byDedupGroup.has(key)) byDedupGroup.set(key, []);
+    byDedupGroup.get(key)!.push(item);
   }
 
-  // Light informational signal only: which cards show up across multiple
-  // threads. This is descriptive metadata, not a dedup decision.
+  lines.push(`## Actionable Bugs (${actionable.length} issues to create)`);
+  lines.push(``);
+  if (actionable.length === 0) {
+    lines.push(`_None._`);
+  } else {
+    for (const [group, groupItems] of [...byDedupGroup.entries()].sort()) {
+      lines.push(`### ${group}`);
+      lines.push(``);
+      for (const item of groupItems) {
+        lines.push(`- **${item.thread_name}** — ${item.summary}`);
+        lines.push(`  - ID: \`${item.report_id}\` | Confidence: ${item.extraction_confidence.toFixed(2)} | [Discord](${item.source_url})`);
+        lines.push(`  - Cards: ${item.cards.join(", ") || "_none_"} | Parser: ${item.parser_status}`);
+      }
+      lines.push(``);
+    }
+  }
+
+  // --- Needs human review ---
+  const needsReview = items.filter((i) => i.proposed_action === "needs_human_review");
+  lines.push(`## Needs Human Review (${needsReview.length} items)`);
+  lines.push(``);
+  if (needsReview.length === 0) {
+    lines.push(`_None._`);
+  } else {
+    for (const item of needsReview) {
+      lines.push(`- **[${item.classification}]** ${item.thread_name} — ${item.summary}`);
+      lines.push(`  - ID: \`${item.report_id}\` | Confidence: ${item.extraction_confidence.toFixed(2)} | Parser: ${item.parser_status} | [Discord](${item.source_url})`);
+      lines.push(`  - Reason: ${item.reason}`);
+    }
+  }
+  lines.push(``);
+
+  // --- Skipped summary ---
+  const skipped = items.filter((i) => i.proposed_action === "skip");
+  const skipByClass = new Map<string, number>();
+  for (const item of skipped) {
+    skipByClass.set(item.classification, (skipByClass.get(item.classification) ?? 0) + 1);
+  }
+
+  lines.push(`## Skipped (${skipped.length} items)`);
+  lines.push(``);
+  for (const [cls, count] of [...skipByClass.entries()].sort()) {
+    lines.push(`- **${cls}**: ${count}`);
+  }
+  lines.push(``);
+
+  // --- Dedup groups: cards in multiple threads ---
   const cardThreads = new Map<string, Set<string>>();
   for (const item of items) {
-    if (item.cards.length === 0) continue;
-    const key = item.cards[0].toLowerCase();
-    if (!cardThreads.has(key)) cardThreads.set(key, new Set());
-    cardThreads.get(key)!.add(item.thread_id);
+    if (item.dedup_group === null) continue;
+    if (!cardThreads.has(item.dedup_group)) cardThreads.set(item.dedup_group, new Set());
+    cardThreads.get(item.dedup_group)!.add(item.thread_id);
   }
   const multiThread = [...cardThreads.entries()]
     .filter(([, threads]) => threads.size > 1)
     .sort((a, b) => b[1].size - a[1].size);
 
-  lines.push(`## Cards appearing in multiple threads (informational)`);
+  lines.push(`## Dedup Groups (cards in multiple threads)`);
   lines.push(``);
   if (multiThread.length === 0) {
     lines.push(`_No cards appear in multiple threads._`);
@@ -87,20 +125,6 @@ export function renderTriageDashboard(items: TriageItem[]): string {
     }
   }
   lines.push(``);
-
-  lines.push(`## Items by thread`);
-  lines.push(``);
-  for (const [threadId, threadItems] of [...byThread.entries()].sort()) {
-    lines.push(`### ${threadItems[0].thread_name}`);
-    lines.push(`_thread_id: \`${threadId}\` · ${threadItems.length} item${threadItems.length === 1 ? "" : "s"}_`);
-    lines.push(``);
-    for (const item of threadItems) {
-      lines.push(`- **${item.summary || "_(no summary)_"}**`);
-      lines.push(`  - ID: \`${item.report_id}\` | Confidence: ${item.extraction_confidence.toFixed(2)} | [Discord](${item.source_url})`);
-      lines.push(`  - Cards: ${item.cards.join(", ") || "_none_"}`);
-    }
-    lines.push(``);
-  }
 
   return lines.join("\n");
 }

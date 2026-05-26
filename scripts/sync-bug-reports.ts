@@ -327,12 +327,21 @@ async function writeTriageDelta(items: TriageItem[]): Promise<void> {
   const delta = items.filter((it) => deltaIds.has(it.message_id));
   await writeJsonl(TRIAGE_DELTA_PATH, delta);
 
-  // No heuristic filtering or bucket histograms — the LLM operator running
-  // /bug-triage reads the full delta and applies its own action bucketing.
-  const threads = new Set(delta.map((it) => it.thread_id));
+  const toResolve = delta.filter((it) => it.proposed_action !== "skip");
+  const byAction = new Map<string, number>();
+  for (const it of delta) {
+    byAction.set(it.proposed_action, (byAction.get(it.proposed_action) ?? 0) + 1);
+  }
+
   console.log(`  ---`);
-  console.log(`  Delta (new since last fetch): ${delta.length} items across ${threads.size} threads → ${TRIAGE_DELTA_PATH}`);
-  console.log(`  Next: hand the delta to /bug-triage for LLM-driven classification.`);
+  console.log(`  Delta (new since last fetch): ${delta.length} items → ${TRIAGE_DELTA_PATH}`);
+  for (const action of [...byAction.keys()].sort()) {
+    console.log(`    ${action}: ${byAction.get(action)}`);
+  }
+  console.log(`  Reports to resolve this cycle (REVIEW THESE): ${toResolve.length}`);
+  for (const o of toResolve) {
+    console.log(`    - ${o.thread_name}  [${o.classification} / ${o.proposed_action}]`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -442,23 +451,46 @@ async function cmdTriage(): Promise<void> {
   await mkdir("triage", { recursive: true });
   await writeJsonl(TRIAGE_ITEMS_PATH, items);
 
-  // Mechanical telemetry only. The script no longer classifies; the LLM
-  // operator running /bug-triage owns all bucketing, dedupe, and action.
-  const threadCount = new Set(items.map((i) => i.thread_id)).size;
-  const itemsWithCards = items.filter((i) => i.cards.length > 0).length;
+  // Build stats
+  const byClass = new Map<string, number>();
+  const byAction = new Map<string, number>();
+  const byParserStatus = new Map<string, number>();
+
+  for (const item of items) {
+    byClass.set(item.classification, (byClass.get(item.classification) ?? 0) + 1);
+    byAction.set(item.proposed_action, (byAction.get(item.proposed_action) ?? 0) + 1);
+    byParserStatus.set(item.parser_status, (byParserStatus.get(item.parser_status) ?? 0) + 1);
+  }
 
   console.log(`Triage complete.`);
   console.log(`  Total items: ${items.length}`);
-  console.log(`  Threads represented: ${threadCount}`);
-  console.log(`  Items with at least one card name: ${itemsWithCards}`);
+  console.log(`  Primary reports: ${byClass.get("primary_report") ?? 0}`);
+  console.log(`  Additional reports: ${byClass.get("additional_report") ?? 0}`);
+  console.log(`  Follow-ups: ${byClass.get("follow_up") ?? 0}`);
+  console.log(`  Developer replies: ${byClass.get("developer_reply") ?? 0}`);
+  console.log(`  Corrections: ${byClass.get("correction") ?? 0}`);
+  console.log(`  Chatter: ${byClass.get("chatter") ?? 0}`);
+  console.log(`  Evidence-only: ${byClass.get("evidence_only") ?? 0}`);
+  console.log(`  ---`);
+  for (const action of [...byAction.keys()].sort()) {
+    console.log(`  Proposed: ${action}: ${byAction.get(action) ?? 0}`);
+  }
+  console.log(`  ---`);
+  console.log(
+    `  Parser status: fully_parsed: ${byParserStatus.get("fully_parsed") ?? 0}, ` +
+    `has_gaps: ${byParserStatus.get("has_gaps") ?? 0}, ` +
+    `unknown_card: ${byParserStatus.get("unknown_card") ?? 0}, ` +
+    `no_card: ${byParserStatus.get("no_card") ?? 0}`,
+  );
   console.log(`  Written to ${TRIAGE_ITEMS_PATH}`);
 
   await writeTriageDelta(items);
 }
 
 async function cmdDelta(): Promise<void> {
-  // Re-emit triage/triage-delta.jsonl from the existing triage-items.jsonl.
-  // Useful to inspect the latest fetch window's new reports on demand.
+  // Re-emit triage/triage-delta.jsonl from the existing triage-items.jsonl
+  // without re-running classification. Useful to inspect the latest fetch
+  // window's new reports on demand.
   const items = readJsonl<TriageItem>(TRIAGE_ITEMS_PATH);
   if (items.length === 0) {
     console.error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
@@ -561,14 +593,13 @@ function buildVerifiedOracleTextSection(item: TriageItem): string[] {
 // issues on instruction, react/reply on instruction, persist state.
 
 
-// Mechanics-only: pick the earliest item in the thread (items are already
-// sorted reported_at ascending in triageReports). The orchestrator (LLM) has
-// already decided to publish this thread by listing it in --thread; this
-// function only chooses WHICH item's summary/cards to use for the issue body.
-// It does not gate.
+// Mechanics-only: pick the primary_report for a thread, or fall back to the
+// first item. The orchestrator (LLM) has already decided to publish this
+// thread by listing it in --thread; this function only chooses WHICH item's
+// summary/cards to use for the issue body. It does not gate.
 function pickPublishItem(items: TriageItem[]): TriageItem | null {
   if (items.length === 0) return null;
-  return items[0];
+  return items.find((it) => it.classification === "primary_report") ?? items[0];
 }
 
 function buildIssueTitle(item: TriageItem): string {
@@ -592,6 +623,7 @@ function buildIssueBody(item: TriageItem): string {
     ``,
     `**Thread:** ${item.thread_name}`,
     `**Cards:** ${relevantCards.length > 0 ? relevantCards.join(", ") : "_none detected_"}`,
+    `**Parser status:** ${item.parser_status}`,
     `**Extraction confidence:** ${item.extraction_confidence.toFixed(2)}`,
     ``,
     `## Summary`,
@@ -1148,15 +1180,13 @@ function printHelp(): void {
 Commands:
   fetch     Fetch Discord messages → triage/raw/discord-messages.jsonl
   extract   Extract report items from messages → triage/report-items.jsonl
-  triage    Project report items into triage shape → triage/triage-items.jsonl
-            No classification — that is the LLM operator's job (run /bug-triage,
-            which calls bug-coverage-classifier per item). Also emits
-            triage/triage-delta.jsonl: ONLY the reports from the latest fetch
-            window (messages with fetched_at > prev_fetch_at). Review the
-            delta — never the full archive — each cycle.
-  delta     Re-emit triage/triage-delta.jsonl from existing triage-items.jsonl.
-            The delta is the full latest-fetch slice; the LLM operator running
-            /bug-triage decides per item whether to file / dup-link / handle.
+  triage    Classify report items → triage/triage-items.jsonl
+            Also emits triage/triage-delta.jsonl: ONLY the reports from the
+            latest fetch window (messages with fetched_at > prev_fetch_at).
+            Review the delta — never the full archive — each cycle.
+  delta     Re-emit triage/triage-delta.jsonl from existing triage-items.jsonl
+            without re-classifying. Lists every non-skip item the operator must
+            resolve this cycle (file / dup-link / mark-handled).
   pending   List unpublished threads (local-state diff of cursors vs
             published_threads), newest-activity-first. NO judgment applied —
             the operator (an LLM in chat) reads candidates and decides.

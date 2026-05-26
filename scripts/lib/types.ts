@@ -52,26 +52,34 @@ export interface ReportItem {
   status: "unlinked" | "linked" | "duplicate" | "stale" | "ignored";
 }
 
-// Mechanical projection of ReportItem into the triage stage. The script does
-// not classify, bucket, gate, dedup, or pre-judge — those are all the LLM
-// operator's job (running /bug-triage, which calls the bug-coverage-classifier
-// per item and applies its own action bucketing). This type intentionally
-// excludes heuristic fields (classification, proposed_action, parser_status,
-// dedup_group) that an earlier design tried to compute statically and that
-// proved unreliable. See `feedback_triage_script_classification_unreliable.md`
-// in project memory for the prior-art.
+export type TriageClassification =
+  | "primary_report"
+  | "additional_report"
+  | "follow_up"
+  | "developer_reply"
+  | "correction"
+  | "chatter"
+  | "evidence_only";
+
 export interface TriageItem {
   report_id: string;
+  classification: TriageClassification;
+  reason: string;
   thread_id: string;
   thread_name: string;
   message_id: string;
-  reported_at: string;
-  author_name: string;
   cards: string[];
   summary: string;
-  actual: string;
   extraction_confidence: number;
   source_url: string;
+  parser_status: "fully_parsed" | "has_gaps" | "unknown_card" | "no_card";
+  // The script never pre-judges duplication. An LLM operator reads the delta and
+  // is the sole arbiter of whether a report duplicates an existing GH issue, so
+  // there is no `append_to_existing` / `skip_existing_closed` machine output.
+  proposed_action: "create_issue" | "skip" | "needs_human_review";
+  // First detected card name, used only as a dashboard grouping/“same card in
+  // multiple threads” key in render.ts — NOT a dedup decision.
+  dedup_group: string | null;
 }
 
 export interface PublishedThread {
