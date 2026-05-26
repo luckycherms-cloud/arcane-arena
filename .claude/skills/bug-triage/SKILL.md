@@ -22,17 +22,23 @@ bun scripts/sync-bug-reports.ts render
 
 # Review ONLY the delta — the reports new since the last fetch. NEVER scan the
 # full triage-items.jsonl looking for "what's new"; that is how reports get
-# missed. `triage` prints the delta + a "reports to resolve" list (every
-# non-skip item).
-bun scripts/sync-bug-reports.ts delta      # re-emit delta without re-classifying
+# missed.
+bun scripts/sync-bug-reports.ts delta      # re-emit delta from triage-items.jsonl
 
-# CRITICAL — the script does NOT dedup against GitHub and does NOT pre-judge
-# duplicates (only `create_issue` / `skip` / `needs_human_review` exist). YOU are
-# the arbiter: for each non-skip delta item, decide whether it is a new bug, a
-# duplicate of an existing issue, or already-known, then act on it. `publish`
-# only files the threads you pass via `--thread`; every other non-skip delta item
-# (`needs_human_review`, or a `create_issue` thread you did not publish) must
-# still be resolved inline — see *Delta Completion Invariant* below.
+# CRITICAL — the script does NOT classify, dedup, or bucket. It emits the raw
+# extracted delta (TriageItem rows). YOU are the sole classifier:
+#   1. For each delta item with at least one card name, call the
+#      bug-coverage-classifier to learn whether the misbehaving aspect is in a
+#      supported clause (=> defect, investigate) or unsupported clause
+#      (=> known gap, defer unless trivial):
+#        echo '{"card_name":"<card>","bug_description":"<summary+actual>"}' \
+#          | bun scripts/classify-bug-coverage.ts --stdin
+#      Pass --fragment when the report quotes Oracle text directly.
+#   2. For items with no card name (runtime / UI / multiplayer / AI / deckbuilder
+#      reports), classify from the text yourself — the classifier will return
+#      `not_card_data_attributable` and that is correct.
+#   3. Decide per item whether to file a NEW issue, mark DUP-OF-#N, APPEND-TO-#N,
+#      or MARK-HANDLED. See *Delta Completion Invariant* below.
 
 # Publish: for each --thread, CREATE a new GH issue from the triage item AND
 # react 👀 + post a tracking link inside the originating Discord thread.
@@ -66,47 +72,52 @@ gh issue view <N> --repo phase-rs/phase --json subIssues,title,body
 gh issue list --repo phase-rs/phase --label "collector" --state closed --limit 50 --json number,title,closedAt
 ```
 
-## Delta Completion Invariant — Every Non-Skip Item, Same Cycle
+## Delta Completion Invariant — Every Delta Thread, Same Cycle
 
-**Hard rule.** A fetch cycle is NOT done until *every* delta item with a
-non-`skip` proposed action has been resolved — either an issue created with
+**Hard rule.** A fetch cycle is NOT done until *every thread* represented in
+`triage/triage-delta.jsonl` has been resolved — either an issue created with
 write-back, an existing issue linked + write-back, OR a `mark-handled`
-sentinel. The bottom line: after a fetch cycle, the count of unhandled
-non-skip threads must be **zero**. There is no "I'll come back to these
-later" — later never comes, and the reporter sees a stale Discord thread.
+sentinel. The bottom line: after a fetch cycle, the count of delta threads
+with no `published_threads` entry must be **zero**. There is no "I'll come
+back to these later" — later never comes, and the reporter sees a stale
+Discord thread.
 
 **The recurring failure (do NOT regress it):**
 `bun scripts/sync-bug-reports.ts publish` only files the threads you pass via
-`--thread`. The script does NOT dedup against GitHub and emits only
-`create_issue` / `skip` / `needs_human_review`, so the leftover slice after
-publishing the obvious `create_issue` threads is `needs_human_review` plus any
-`create_issue` thread you chose not to publish. Operators have repeatedly
-published the obvious slice, glanced at the resolve list, and moved on —
-leaving those threads with no Discord eyes / no tracking link / no
-published_threads entry. This is the orphan source. Two fetch rounds in a row
-hit it; the user noticed.
+`--thread`. The script does not classify or pre-judge — it emits the raw
+delta. Operators have repeatedly published the obvious card-defect slice,
+glanced at the rest, and moved on — leaving the remaining threads with no
+Discord eyes / no tracking link / no published_threads entry. This is the
+orphan source. Two fetch rounds in a row hit it; the user noticed.
 
-**Mandatory cycle close-out** — run after `publish` on the `create_issue` slice:
+**Mandatory cycle close-out** — run after `publish`:
 
 ```bash
-# 1. List every delta item that is NOT create_issue or skip — i.e. the
-#    needs_human_review leftovers. These MUST all be resolved before the
-#    cycle is done. (create_issue threads are handled by `publish`.)
-jq -r 'select(.proposed_action != "create_issue"
-              and .proposed_action != "skip")
-       | "\(.thread_id) | \(.thread_name) | \(.proposed_action)"' \
-  triage/triage-delta.jsonl
+# 1. List every delta thread you have NOT yet published or marked handled.
+#    Every entry MUST be resolved before the cycle is done.
+jq -r '[.thread_id, .thread_name, .summary] | @tsv' \
+  triage/triage-delta.jsonl \
+| sort -u -k1,1 \
+| while IFS=$'\t' read tid name summary; do
+    entry=$(jq --arg t "$tid" '.published_threads[$t]' triage/sync-state.json)
+    if [ "$entry" = "null" ]; then
+      printf '%s | %s | %s\n' "$tid" "$name" "$summary"
+    fi
+  done
 ```
 
 For each thread the list prints, do ONE of the following inline — do NOT
-park it for a subagent unless you can sit and watch the subagent finish:
+park it for a subagent unless you can sit and watch the subagent finish.
+Use the bug-coverage-classifier (see *Quick Commands*) on card-bearing
+items to inform the NEW vs MARK-HANDLED choice — `unsupported_aspect`
+defers, `supported_aspect_defect` files.
 
 | Decision | Action |
 |----------|--------|
-| **NEW** — heuristic misclassified; this is a fresh report no existing issue covers | `gh issue create` + Discord write-back (Path B in *Discord Write-Back*); record `mode:"inline"` in `published_threads` |
+| **NEW** — fresh report no existing issue covers (typically `supported_aspect_defect` per classifier, or a runtime/UI bug not pinned to a card) | `gh issue create` + Discord write-back (Path B in *Discord Write-Back*); record `mode:"inline"` in `published_threads` |
 | **DUP-OF-#N** — true duplicate of an existing open/closed issue | Discord write-back to #N (Path B); record `mode:"reconciled"` in `published_threads` |
 | **APPEND-TO-#N** — followup on a still-open issue worth a comment | `gh issue comment N --body "..."` + Discord write-back; record `mode:"reconciled"` |
-| **MARK-HANDLED** — chatter / self-resolved / not a bug | Write a sentinel `{issue_number:0, mode:"mark-handled", reason:"<one line>"}` in `published_threads`; no GH, no Discord |
+| **MARK-HANDLED** — chatter / self-resolved / not a bug / classifier returned `unsupported_aspect` with no easy fix | Write a sentinel `{issue_number:0, mode:"mark-handled", reason:"<one line>"}` in `published_threads`; no GH, no Discord |
 
 Inline procedure for fast batch handling — a single shell session can do the
 12-thread case in a couple of minutes:
@@ -131,11 +142,11 @@ done
 **Verification — same as the published_threads invariant audit:**
 
 ```bash
-# Every delta non-skip thread must now appear in published_threads with
-# either a real reply_message_id (real issue) OR mode:"mark-handled".
-jq -r 'select(.proposed_action != "create_issue"
-              and .proposed_action != "skip")
-       | .thread_id' triage/triage-delta.jsonl \
+# Every delta thread must now appear in published_threads with either a real
+# reply_message_id (real issue) OR mode:"mark-handled". No exceptions —
+# the script does not pre-filter, so every delta thread is your responsibility.
+jq -r '.thread_id' triage/triage-delta.jsonl \
+  | sort -u \
   | while read tid; do
       entry=$(jq --arg t "$tid" '.published_threads[$t]' triage/sync-state.json)
       if [ "$entry" = "null" ]; then
@@ -650,7 +661,7 @@ Also at this step: audit open `collector` trackers. When a resync pass closes ch
 bun scripts/sync-bug-reports.ts fetch
 ```
 If new messages exist, re-run extract → triage → render. Then review **`triage/triage-delta.jsonl`** — and ONLY that file. It contains exactly the triage items from the latest fetch window (messages with `fetched_at > prev_fetch_at`). Do not re-process every historical Discord thread as new work, and do not hand-filter `triage-items.jsonl` by snowflake/timestamp guesses — that is how orphaned reports get missed. The raw store and dashboards regenerate from the full message archive for determinism, but GitHub issue work is delta-based:
-- The `triage` command prints the delta breakdown + a **"reports to resolve" list**: every non-skip delta item. Each must be filed (`publish --thread=`), linked/deduped to an existing issue, or `mark-handled`. Never ignore one.
+- The `triage` command emits `triage/triage-delta.jsonl` with every report from the latest fetch window. Every delta thread must be filed (`publish --thread=`), linked/deduped to an existing issue, or `mark-handled`. Never ignore one. Classification (which thread is a real defect vs a known gap vs chatter) is your job; use the bug-coverage-classifier (`scripts/classify-bug-coverage.ts`) on card-bearing items to inform it.
 - Use Discord cursors in `triage/sync-state.json` and the `fetch` command's "New messages fetched" count to decide whether there is new Discord input.
 - Treat `report_id` (`discord:<thread_id>:<message_id>:<item_index>`) as the stable idempotency key. The script does NOT dedup against GitHub — **you** are the arbiter. Before creating work, search GitHub issues/comments for that report id or thread/message URL.
 - Your manual dedupe checks MUST include closed issues: use `--state all`, not `--state open`. Closed `status:fixed-unreleased`, `stale`, `duplicate`, and `wont-fix` issues are still authoritative triage records and must prevent duplicate creation.
@@ -658,7 +669,7 @@ If new messages exist, re-run extract → triage → render. Then review **`tria
 - Existing GitHub issues, comments, labels, and sub-issue parentage are the persistent triage state. Update those records instead of rediscovering or refiling old reports.
 - If an old report appears in the regenerated dashboard but already has a GH issue/comment or a documented stale/duplicate decision, skip it unless the Discord thread has a newer message with a new `report_id`.
 
-**Hard rule:** `parser_status: fully_parsed` is parser metadata only. It must never classify a user report as `likely_fixed`, stale, skipped, or ignorable. Runtime, frontend, AI, deckbuilder, multiplayer, and UI reports still require subsystem evidence or a GH issue even when all referenced cards are fully parsed.
+**Hard rule:** the bug-coverage-classifier verdict is advisory metadata only. A `supported_aspect_defect` verdict tells you the clause is *claimed* to work — it does NOT prove the bug is in that clause, the parser AST may still be wrong (per project memory `project_backlog_is_parser_misparses.md`), and the runtime may still drop the parsed AST silently (`project_parsed_ast_not_consumed.md`). A `not_card_data_attributable` verdict is the *only* signal that the bug is outside `parse_details` — runtime, frontend, AI, deckbuilder, multiplayer, and UI reports still require subsystem evidence or a GH issue regardless of what the classifier says.
 
 ### Step 5: Update dashboard
 ```bash
@@ -743,7 +754,7 @@ commands generate the `.jsonl` files; `triage/llm-triage-items.jsonl`,
 |------|-------------|-------------|------------|
 | `triage/raw/discord-messages.jsonl` | Raw Discord messages (775+) | `fetch` | yes |
 | `triage/report-items.jsonl` | Heuristic-extracted report items | `extract` | yes |
-| `triage/triage-items.jsonl` | Heuristic triage classifications | `triage` | yes |
+| `triage/triage-items.jsonl` | Raw triage projection (mechanical, no classification — LLM classifies via bug-coverage-classifier) | `triage` | yes |
 | `triage/triage-delta.jsonl` | Triage items from the latest fetch window ONLY — the slice to review each cycle | `triage` / `delta` | yes |
 | `triage/llm-triage-items.jsonl` | LLM (Sonnet) triage — 333 items, best quality | LLM pass | yes |
 | `triage/coverage-crossref.jsonl` | Cross-reference against parser coverage | `crossref` | yes |
