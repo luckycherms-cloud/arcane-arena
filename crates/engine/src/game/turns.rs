@@ -471,6 +471,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.hand_cast_free_permissions_used.clear();
     // CR 601.2a: Reset per-turn PlayFromExile source usage (Evelyn-style permissions).
     state.exile_play_permissions_used.clear();
+    // CR 601.2a + CR 113.6b: Reset per-turn ExileCastPermission once-per-turn
+    // tracking (Maralen, Fae Ascendant) and the rolling list of cards exiled
+    // with each tracked source this turn. Both are turn-scoped slices; the
+    // persistent `exile_links` pool is untouched and continues to back the
+    // open-ended "cards exiled with ~" filter for sources without a per-turn
+    // cap.
+    state.exile_cast_permissions_used.clear();
+    state.cards_exiled_with_source_this_turn.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
     state.cards_drawn_this_turn.clear();
@@ -2893,6 +2901,34 @@ mod tests {
         assert!(!state.players[0].has_drawn_this_turn);
         assert_eq!(state.players[0].lands_played_this_turn, 0);
         assert!(state.counter_added_this_turn.is_empty());
+    }
+
+    /// CR 601.2a + CR 113.6b: Turn cleanup must clear BOTH the per-source
+    /// `ExileCastPermission` once-per-turn slots AND the rolling "cards exiled
+    /// with this source this turn" pool (Maralen, Fae Ascendant). Driven
+    /// through `start_next_turn` rather than a manual `.clear()`, so a
+    /// regression dropping either reset line in `start_next_turn` fails here
+    /// instead of staying green.
+    #[test]
+    fn start_next_turn_resets_exile_cast_permission_tracking() {
+        let mut state = setup();
+        let source = ObjectId(42);
+        state.exile_cast_permissions_used.insert(source);
+        state
+            .cards_exiled_with_source_this_turn
+            .insert(source, vec![ObjectId(7)]);
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert!(
+            state.exile_cast_permissions_used.is_empty(),
+            "OncePerTurn exile-cast slots must reset at turn start"
+        );
+        assert!(
+            state.cards_exiled_with_source_this_turn.is_empty(),
+            "per-turn exiled-with-source pool must reset at turn start"
+        );
     }
 
     #[test]
