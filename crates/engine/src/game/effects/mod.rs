@@ -853,6 +853,21 @@ fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
 ) {
     child.context = parent.context.clone();
+    // CR 608.2c: A sub-ability is part of the same printed ability instance as
+    // its parent; its instructions are followed in order during a single
+    // resolution. Propagate the parent's `ability_index` so chain-level
+    // `AbilityCondition::NthResolutionThisTurn` gates can identify "this ability"
+    // when evaluated on a chained sub-ability. The per-turn resolution counter is
+    // keyed on `(source_id, ability_index)`; without this the sub carries no
+    // index and the gate always evaluates false, so e.g. Nissa, Resurgent
+    // Animist's "Then if this is the second time this ability has resolved this
+    // turn, reveal ..." never fires its second-resolution half. Sub-abilities
+    // always resolve at depth > 0, so propagating the index never causes a
+    // spurious counter bump (that happens only at the depth-0 top-level
+    // resolution). Guarded on `is_none()` to never clobber an explicit index.
+    if child.ability_index.is_none() {
+        child.ability_index = parent.ability_index;
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -11712,6 +11727,75 @@ mod tests {
         );
         ability.ability_index = Some(idx);
         ability
+    }
+
+    /// Issue #1595 — Nissa, Resurgent Animist. A chained `SequentialSibling`
+    /// sub-ability gated on `NthResolutionThisTurn{2}` must fire on the SECOND
+    /// resolution this turn. Before the fix, sub-abilities carried no
+    /// `ability_index`, so the gate evaluated false forever and the second-
+    /// resolution half never happened (the reported "only did the first portion
+    /// again and added the mana"). Drives the real `resolve_ability_chain`
+    /// descent (which routes through `apply_parent_chain_context`).
+    #[test]
+    fn nth_resolution_gates_sequential_sibling_subability() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+
+        // Sub: gain 100 life, gated on the 2nd resolution (SequentialSibling).
+        let mut sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 100 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        sub.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        sub.sub_link = SubAbilityLink::SequentialSibling;
+        // The sub is built WITHOUT an ability_index, exactly as the trigger
+        // pipeline produces it (only the top-level trigger gets a stamp).
+        assert!(sub.ability_index.is_none());
+
+        // Top-level: gain 1 life ALWAYS (the "add mana" analogue), index stamped.
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.ability_index = Some(0);
+
+        let start = state.players[0].life;
+        let mut events = Vec::new();
+
+        // Resolution 1: only the top-level fires (+1); gated sub must NOT fire.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start + 1,
+            "1st resolution: only the top-level (+1) should fire"
+        );
+
+        // Resolution 2: top-level (+1) AND the gated sub (+100) both fire.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start + 1 + 1 + 100,
+            "2nd resolution: top-level (+1) AND gated sub (+100) must BOTH fire"
+        );
+
+        // Counter must read exactly 2 — the propagated index must not have
+        // caused the sub to bump the counter a second time per resolution.
+        assert_eq!(
+            state.ability_resolutions_this_turn[&(source_id, 0)],
+            2,
+            "counter must be bumped exactly once per top-level resolution"
+        );
     }
 
     #[test]
