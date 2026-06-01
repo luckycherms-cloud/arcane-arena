@@ -1272,6 +1272,14 @@ pub fn synthesize_cycling(face: &mut CardFace) {
         })
         .collect();
 
+    // CR 702.29a + CR 702.29c + CR 702.29e: Tag every synthesized cycling /
+    // typecycling ability with `AbilityTag::Cycling` so that activating it emits
+    // a `GameEvent::Cycled` ("When you cycle this card" triggers, CR 702.29c).
+    let mut cycling_abilities = cycling_abilities;
+    for def in &mut cycling_abilities {
+        def.ability_tag = Some(AbilityTag::Cycling);
+    }
+
     face.abilities.extend(cycling_abilities);
 }
 
