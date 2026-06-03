@@ -65,6 +65,17 @@ pub struct PreparedState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BestowFormState;
 
+/// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
+/// prototyped and should use the secondary power, toughness, and mana cost
+/// characteristics while it is a spell or permanent on the battlefield.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrototypeFormState {
+    pub mana_cost: ManaCost,
+    pub power: i32,
+    pub toughness: i32,
+    pub colors: Vec<ManaColor>,
+}
+
 /// Oathbreaker RC: command-zone role marker for a signature spell.
 ///
 /// A signature spell is an instant or sorcery that starts in the command zone,
@@ -506,6 +517,12 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bestow_form: Option<BestowFormState>,
 
+    /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
+    /// layer system uses the stored secondary characteristics whenever the
+    /// object is a creature; normal casts leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype_form: Option<PrototypeFormState>,
+
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
     /// Carries the printed-form ability snapshot captured before the swap so the
@@ -928,6 +945,7 @@ impl GameObject {
             additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
+            prototype_form: None,
             cleave_form: None,
             cleave_variant: None,
             unimplemented_mechanics: Vec::new(),

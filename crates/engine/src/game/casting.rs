@@ -38,7 +38,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
-use super::game_object::PreparedState;
+use super::game_object::{PreparedState, PrototypeFormState};
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -2576,6 +2576,17 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.160a: When the caller explicitly opted into Prototype (via
+    // `variant_override = Some(CastingVariant::Prototype)`), substitute the
+    // prototype mana cost carried by the keyword payload.
+    let prototype_cost = if casting_variant == CastingVariant::Prototype {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Prototype { cost, .. } => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
@@ -2698,6 +2709,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(awaken_cost)
             .or(cleave_cost)
             .or(impending_cost)
+            .or(prototype_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -4223,6 +4235,130 @@ pub fn handle_impending_cost_choice_with_payment_mode(
                 object_id,
                 Some(CastingVariant::Impending),
             )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+fn prototype_form_from_object(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<PrototypeFormState> {
+    obj.keywords.iter().find_map(|keyword| {
+        let Keyword::Prototype {
+            cost,
+            power: Some(power),
+            toughness: Some(toughness),
+        } = keyword
+        else {
+            return None;
+        };
+        Some(PrototypeFormState {
+            mana_cost: cost.clone(),
+            power: *power,
+            toughness: *toughness,
+            colors: prototype_colors_from_cost(cost),
+        })
+    })
+}
+
+fn prototype_colors_from_cost(cost: &ManaCost) -> Vec<ManaColor> {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return Vec::new();
+    };
+    ManaColor::ALL
+        .into_iter()
+        .filter(|color| shards.iter().any(|shard| shard.contributes_to(*color)))
+        .collect()
+}
+
+/// CR 702.160a: Apply the prototype alternative characteristics to the object
+/// once the player chooses to cast it prototyped. This mutates only live
+/// characteristics plus the typed marker; printed base characteristics remain
+/// unchanged so zone cleanup and normal future casts can restore them.
+fn apply_prototype_form(obj: &mut crate::game::game_object::GameObject) -> bool {
+    let Some(form) = prototype_form_from_object(obj) else {
+        return false;
+    };
+    obj.mana_cost = form.mana_cost.clone();
+    obj.power = Some(form.power);
+    obj.toughness = Some(form.toughness);
+    obj.color = form.colors.clone();
+    obj.prototype_form = Some(form);
+    true
+}
+
+/// CR 702.160a + CR 400.7: Restore printed characteristics when a prototyped
+/// cast is backed out before the object reaches a live Prototype zone, or when
+/// zone cleanup turns it into a new object.
+pub(crate) fn clear_prototype_form(obj: &mut crate::game::game_object::GameObject) {
+    obj.prototype_form = None;
+    obj.mana_cost = obj.base_mana_cost.clone();
+    obj.power = obj.base_power;
+    obj.toughness = obj.base_toughness;
+    obj.color = obj.base_color.clone();
+}
+
+/// CR 702.160a: Player chose the normal or prototyped cast path for a Prototype
+/// card. `Alternative` applies the secondary mana cost and P/T before
+/// preparation so the announced stack spell already has prototype
+/// characteristics; `Normal` proceeds as the printed spell.
+pub fn handle_prototype_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_prototype_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_prototype_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            if !state
+                .objects
+                .get_mut(&object_id)
+                .is_some_and(apply_prototype_form)
+            {
+                return Err(EngineError::InvalidAction(
+                    "Prototype characteristics are unavailable for this object".to_string(),
+                ));
+            }
+            let mut prepared = match prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Prototype),
+            ) {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        clear_prototype_form(obj);
+                    }
+                    return Err(err);
+                }
+            };
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
         }
@@ -5862,6 +5998,54 @@ pub fn handle_cast_spell_with_payment_mode(
                     );
                 }
                 // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.160a: Prototype — when a hand card has complete prototype
+    // secondary characteristics, present a choice between the printed mana cost
+    // and the prototype cost when both are affordable. Prototype is opt-in via
+    // `variant_override`, so falling through proceeds as the printed creature.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(prototype_form) = prototype_form_from_object(obj) {
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let prototype_cost_eff = apply_cost_modifiers_to_base(
+                    state,
+                    player,
+                    object_id,
+                    prototype_form.mana_cost.clone(),
+                )
+                .unwrap_or_else(|| prototype_form.mana_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let prototype_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff);
+                if normal_affordable && prototype_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Prototype,
+                        normal_cost,
+                        alternative_cost: Some(prototype_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && prototype_affordable {
+                    return handle_prototype_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
             }
         }
     }
@@ -9607,6 +9791,14 @@ pub fn handle_cancel_cast(
         // completes restores the card's normal front face in its origin zone.
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             swap_to_alternative_spell_face(obj);
+        }
+    }
+
+    if pending.casting_variant == CastingVariant::Prototype {
+        // CR 601.2i + CR 702.160a: backing out of a prototyped cast before
+        // costs are committed restores the printed characteristics in hand.
+        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+            clear_prototype_form(obj);
         }
     }
 
@@ -28743,6 +28935,107 @@ mod tests {
                 "expected DestroyAll after overload transform, got {:?}",
                 def.effect
             );
+        }
+    }
+
+    /// CR 702.160a: Prototype end-to-end — `handle_cast_spell` offers a
+    /// Prototype alternative-cost choice when both costs are affordable, and
+    /// selecting Prototype prepares the spell with secondary mana cost/P/T
+    /// characteristics on the object before it is announced on the stack.
+    mod prototype_cast_flow {
+        use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
+        use crate::types::keywords::Keyword;
+
+        fn create_prototype_creature_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(160),
+                player,
+                "Combat Thresher".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+            obj.keywords.push(Keyword::Prototype {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: Some(1),
+                toughness: Some(1),
+            });
+            obj.base_keywords = obj.keywords.clone();
+            obj_id
+        }
+
+        #[test]
+        fn offer_prototype_when_both_costs_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 7);
+            add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+            let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+
+            let wf = handle_cast_spell(&mut state, PlayerId(0), obj, CardId(160), &mut Vec::new())
+                .expect("prototype cast offer should be generated");
+
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Prototype,
+                        ..
+                    }
+                ),
+                "expected AlternativeCastChoice(Prototype), got {wf:?}"
+            );
+        }
+
+        #[test]
+        fn choosing_prototype_sets_stack_characteristics() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+            let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+
+            let wf = handle_prototype_cost_choice_with_payment_mode(
+                &mut state,
+                PlayerId(0),
+                obj,
+                CardId(160),
+                AlternativeCastDecision::Alternative,
+                CastPaymentMode::Auto,
+                &mut Vec::new(),
+            )
+            .expect("prototype choice should enter the cast pipeline");
+
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. }
+                ),
+                "prototype cast should continue to payment or complete, got {wf:?}"
+            );
+            let prototyped = state.objects.get(&obj).unwrap();
+            assert!(prototyped.prototype_form.is_some());
+            assert_eq!(prototyped.mana_cost.mana_value(), 3);
+            assert_eq!(prototyped.power, Some(1));
+            assert_eq!(prototyped.toughness, Some(1));
+            assert_eq!(prototyped.color, vec![ManaColor::White]);
+            assert_eq!(prototyped.base_mana_cost.mana_value(), 7);
+            assert_eq!(prototyped.base_power, Some(3));
+            assert_eq!(prototyped.base_toughness, Some(3));
         }
     }
 
