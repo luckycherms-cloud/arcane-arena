@@ -251,6 +251,9 @@ impl KeywordTriggerInstaller {
             // each instance triggers separately; one trigger per `Battlecry`.
             Keyword::Battlecry => vec![build_battlecry_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
+            // CR 702.59a: Recover {cost} — graveyard-sourced dies trigger with
+            // a mandatory pay-or-else-exile branch.
+            Keyword::Recover(cost) => vec![build_recover_trigger(cost.clone())],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             // CR 702.25a: Flanking — a becomes-blocked debuff trigger. CR 702.25b:
@@ -308,6 +311,9 @@ impl KeywordTriggerInstaller {
             Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Battlecry => is_battlecry_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
+            // CR 702.59a: symmetric removal identifies the synthesized Recover
+            // dies trigger.
+            Keyword::Recover(_) => is_recover_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Flanking => is_flanking_trigger(trigger),
@@ -4059,6 +4065,164 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     trigger
 }
 
+/// Builds the `Effect::ChangeZone` that moves this card (`SelfRef`) from its
+/// own graveyard to the given `destination`. Shared by the two Recover branches
+/// (`Zone::Hand` for the pay branch, `Zone::Exile` for the otherwise branch).
+fn build_recover_self_change_zone(destination: Zone) -> Effect {
+    Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination,
+        target: TargetFilter::SelfRef,
+        owner_library: false,
+        enter_transformed: false,
+        enters_under: None,
+        enter_tapped: false,
+        enters_attacking: false,
+        up_to: false,
+        enter_with_counters: Vec::new(),
+        face_down_profile: None,
+    }
+}
+
+/// CR 702.59a: Recover {cost} — "When a creature is put into your graveyard
+/// from the battlefield, you may pay [cost]. If you do, return this card from
+/// your graveyard to your hand. Otherwise, exile this card."
+///
+/// Modeled by reusing the unless-pay/pay-with-else machinery
+/// (`AbilityDefinition.unless_pay` + the `IfAPlayerDoes`/effect-performed
+/// sub-ability, resolved by `handle_unless_payment` in
+/// `engine_payment_choices.rs`):
+///   * The PRIMARY effect is the "otherwise exile this card" branch — it runs
+///     when the controller declines or cannot pay (the unless-pay decline path).
+///   * The `unless_pay` modifier carries the Recover {cost}; the payer is the
+///     controller of the Recover card (`TargetFilter::Controller`).
+///   * The pay-success ALTERNATIVE is a `sub_ability` gated on
+///     `AbilityCondition::effect_performed()` (CR 608.2c "if you do"), which
+///     returns this card from the graveyard to its owner's hand. On payment
+///     success `handle_unless_payment` suppresses the primary (exile) and runs
+///     this alternative.
+///
+/// The trigger is GRAVEYARD-SOURCED: `trigger_zones = [Graveyard]` because the
+/// Recover card itself is in the graveyard when it fires, keying on ANOTHER
+/// creature put into your graveyard (`ChangesZone` Battlefield→Graveyard,
+/// `valid_card` = another creature you own). Both branches act on `SelfRef`
+/// (this card in the graveyard).
+///
+/// Single source of truth for the Recover trigger shape, shared by the printed
+/// path (`synthesize_recover`) and the runtime-granted path
+/// (`KeywordTriggerInstaller::triggers_for`) per CR 604.1.
+fn build_recover_trigger(cost: ManaCost) -> TriggerDefinition {
+    // Pay-success alternative (CR 608.2c "if you do"): return this card from the
+    // graveyard to its owner's hand.
+    let return_to_hand = AbilityDefinition::new(
+        AbilityKind::Spell,
+        build_recover_self_change_zone(Zone::Hand),
+    )
+    .condition(AbilityCondition::effect_performed())
+    .description("If you do, return this card from your graveyard to your hand".to_string());
+
+    // Primary (otherwise) branch: exile this card. Runs when the controller
+    // declines or cannot pay the Recover cost.
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        build_recover_self_change_zone(Zone::Exile),
+    )
+    .unless_pay(UnlessPayModifier {
+        cost: AbilityCost::Mana { cost },
+        // CR 702.59a: "you may pay" — the controller of the Recover card pays.
+        payer: TargetFilter::Controller,
+    })
+    .sub_ability(return_to_hand)
+    .description("Otherwise, exile this card".to_string());
+
+    // CR 404.1 + CR 702.59a: "your graveyard" means the creature is put into
+    // its owner's graveyard. `FilterProp::Another` excludes the Recover card
+    // itself; `Owned(You)` restricts to cards owned by the Recover controller.
+    let another_creature_you_own = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+        FilterProp::Another,
+        FilterProp::Owned {
+            controller: ControllerRef::You,
+        },
+    ]));
+
+    let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(another_creature_you_own)
+        .execute(execute)
+        .description(
+            "CR 702.59a: Recover — when a creature is put into your graveyard from the battlefield, you may pay the recover cost; if you do, return this card from your graveyard to your hand, otherwise exile this card."
+                .to_string(),
+        );
+    // CR 702.59a: the Recover card fires this trigger from its own graveyard.
+    trigger.trigger_zones = vec![Zone::Graveyard];
+    trigger
+}
+
+/// Idempotency / symmetric-removal shape predicate for the Recover dies trigger.
+/// True iff `t` is a graveyard-sourced (`trigger_zones` includes `Graveyard`)
+/// `ChangesZone` Battlefield→Graveyard trigger on another creature you own
+/// whose execute body exiles `SelfRef` from the graveyard under an `unless_pay`
+/// modifier, with a `effect_performed`-gated sub-ability returning `SelfRef` to
+/// hand. The cost value is not inspected (cost-independent shape).
+fn is_recover_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.origin != Some(Zone::Battlefield)
+        || t.destination != Some(Zone::Graveyard)
+        || !t.trigger_zones.contains(&Zone::Graveyard)
+    {
+        return false;
+    }
+    let Some(TargetFilter::Typed(tf)) = t.valid_card.as_ref() else {
+        return false;
+    };
+    if !tf.properties.contains(&FilterProp::Another)
+        || !tf.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You,
+        })
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    let exiles_self = matches!(
+        &*execute.effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    let has_unless_pay = execute.unless_pay.is_some();
+    let returns_self_to_hand = execute.sub_ability.as_deref().is_some_and(|sub| {
+        sub.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed)
+            && matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+    });
+    exiles_self && has_unless_pay && returns_self_to_hand
+}
+
+/// CR 702.59a: Recover {cost} — graveyard-sourced dies trigger with a
+/// mandatory pay-or-else-exile branch. Synthesized via the
+/// shared `install_matching` installer so the printed and runtime-granted paths
+/// share the single `build_recover_trigger` shape. Per the absence of a
+/// redundancy clause every `Keyword::Recover` instance functions independently,
+/// so one trigger is emitted per keyword on the face.
+pub fn synthesize_recover(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Recover(_)));
+}
+
 fn is_renown_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::DamageDone)
         && matches!(t.valid_source, Some(TargetFilter::SelfRef))
@@ -6131,6 +6295,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
     synthesize_dethrone(face);
+    // CR 702.59a: Recover {cost} — graveyard-sourced dies trigger with a
+    // mandatory pay-or-else-exile branch.
+    // When another creature is put into your graveyard, you may pay the recover
+    // cost to return this card from your graveyard to your hand; otherwise
+    // exile it.
+    synthesize_recover(face);
     // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
     // creature whenever another creature you control enters with greater power
     // or toughness. CR 702.100d: each instance triggers separately.
@@ -13612,6 +13782,200 @@ mod offspring_synthesis_tests {
         assert_eq!(face.additional_cost, Some(existing));
         // Trigger is still synthesized
         assert_eq!(face.triggers.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod recover_synthesis_tests {
+    use super::*;
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Recover cost {1}{B} (Grave Defiler-style).
+    fn recover_cost() -> ManaCost {
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        }
+    }
+
+    /// Helper: a creature face carrying `Keyword::Recover({1}{B})`.
+    fn face_with_recover() -> CardFace {
+        CardFace {
+            name: "Recoverer".to_string(),
+            oracle_text: Some("Recover {1}{B}".to_string()),
+            keywords: vec![Keyword::Recover(recover_cost())],
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            ..CardFace::default()
+        }
+    }
+
+    /// CR 702.59a: Recover synthesizes a graveyard-sourced "another creature you
+    /// control dies" trigger.
+    #[test]
+    fn synthesize_recover_adds_another_creature_dies_trigger() {
+        let mut face = face_with_recover();
+        synthesize_recover(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_recover_trigger(t))
+            .expect("Recover dies trigger should be synthesized");
+
+        // Dies trigger: Battlefield → Graveyard.
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+
+        // Graveyard-sourced: the Recover card fires from its own graveyard.
+        assert!(
+            trigger.trigger_zones.contains(&Zone::Graveyard),
+            "Recover trigger must be active from the graveyard zone"
+        );
+
+        // valid_card = another creature you own.
+        match trigger.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Creature)));
+                assert!(tf.properties.contains(&FilterProp::Another));
+                assert!(tf.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
+                assert_eq!(tf.controller, None);
+            }
+            other => panic!("expected Typed(another creature you own), got {other:?}"),
+        }
+    }
+
+    /// CR 702.59a + CR 118.12: the trigger's execute is the pay-or-else-exile
+    /// branch — primary effect exiles SelfRef, gated by an `unless_pay` carrying
+    /// the recover cost, with a pay-success sub-ability returning SelfRef to hand.
+    #[test]
+    fn synthesize_recover_builds_pay_or_else_exile_branch() {
+        let mut face = face_with_recover();
+        synthesize_recover(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_recover_trigger(t))
+            .expect("Recover dies trigger should be synthesized");
+        let execute = trigger.execute.as_deref().expect("execute body");
+
+        // Primary (otherwise) branch: exile this card from the graveyard.
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "primary effect must exile SelfRef from the graveyard"
+        );
+
+        // unless_pay carries the recover cost; controller is the payer.
+        let unless_pay = execute
+            .unless_pay
+            .as_ref()
+            .expect("execute must carry an unless_pay modifier");
+        assert_eq!(
+            unless_pay.cost,
+            AbilityCost::Mana {
+                cost: recover_cost()
+            }
+        );
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+
+        // Pay-success alternative: return SelfRef to hand, gated on
+        // effect-performed ("if you do").
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("execute must carry the pay-success sub-ability");
+        assert!(
+            sub.condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed),
+            "return-to-hand branch must be gated on effect-performed"
+        );
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Hand,
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "pay-success branch must return SelfRef from graveyard to hand"
+        );
+    }
+
+    /// Re-running synthesis must not duplicate the trigger.
+    #[test]
+    fn synthesize_recover_is_idempotent() {
+        let mut face = face_with_recover();
+        synthesize_recover(&mut face);
+        let first = face
+            .triggers
+            .iter()
+            .filter(|t| is_recover_trigger(t))
+            .count();
+        synthesize_recover(&mut face);
+        let second = face
+            .triggers
+            .iter()
+            .filter(|t| is_recover_trigger(t))
+            .count();
+        assert_eq!(first, 1);
+        assert_eq!(second, first, "synthesis must be idempotent");
+    }
+
+    /// A face without Recover gets no Recover trigger.
+    #[test]
+    fn synthesize_recover_is_noop_without_keyword() {
+        let mut face = CardFace {
+            name: "Plain Bear".to_string(),
+            keywords: vec![Keyword::Flying],
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            ..CardFace::default()
+        };
+        synthesize_recover(&mut face);
+        assert!(face.triggers.iter().all(|t| !is_recover_trigger(t)));
+    }
+
+    /// CR 604.1: the runtime-granted path (`triggers_for`) yields the same shape
+    /// as the printed path, and `trigger_matches_keyword_kind` recognizes it for
+    /// symmetric removal.
+    #[test]
+    fn triggers_for_recover_matches_keyword_kind() {
+        let kw = Keyword::Recover(recover_cost());
+        let triggers = KeywordTriggerInstaller::triggers_for(&kw);
+        assert_eq!(triggers.len(), 1);
+        assert!(is_recover_trigger(&triggers[0]));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &kw
+        ));
+        // A different keyword's trigger must not match Recover.
+        let dethrone = build_dethrone_trigger();
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &dethrone, &kw
+        ));
     }
 }
 
