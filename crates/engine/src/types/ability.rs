@@ -3306,10 +3306,16 @@ pub enum QuantityRef {
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 508.1a: Number of creatures the controller attacked with this turn.
-    /// Used for "if you attacked this turn" and "for each creature you attacked
-    /// with this turn" patterns.
-    AttackedThisTurn,
+    /// CR 508.1a: Number of creatures the controller attacked with this turn,
+    /// optionally narrowed by `filter` (e.g. "attacked with a token / a
+    /// commander / a Wolf"). `None` counts all attacking creatures (the bare
+    /// "if you attacked this turn" / "for each creature you attacked with this
+    /// turn" patterns); `Some(filter)` counts only this-turn attackers matching
+    /// `filter`, resolved against `state.creatures_attacked_this_turn`.
+    AttackedThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 603.4: Whether the controller descended this turn (permanent card entered graveyard).
     DescendedThisTurn,
     /// CR 606.1 + CR 603.4: Number of loyalty abilities the scoped player has

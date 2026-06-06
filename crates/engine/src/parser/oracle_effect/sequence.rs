@@ -917,6 +917,12 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("the next time "),
         tag("at the beginning "),
         tag("for as long as "),
+        // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
+        // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
+        // whole clause together so the leading-conditional splitter (which gates
+        // the body on the parsed condition) sees the comma, not the chunker.
+        tag("during any turn "),
+        tag("during a turn "),
     ))
     .parse(current_lower)
     .is_ok()

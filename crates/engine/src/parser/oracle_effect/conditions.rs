@@ -63,6 +63,11 @@ pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> 
         tag::<_, _, OracleError<'_>>("then, if "),
         tag("then if "),
         tag("if "),
+        // CR 508.6 + CR 608.2c: temporal "during any turn <cond>, <body>" gate
+        // (Neyali, Neriv, Boros Strike-Captain) — the head names a turn-scoped
+        // condition rather than "if", but splits and gates identically.
+        tag("during any turn "),
+        tag("during a turn "),
     ))
     .parse(lower.as_str())
     .is_err()
@@ -138,6 +143,8 @@ pub(crate) fn strip_leading_general_conditional(
                     tag::<_, _, OracleError<'_>>("then, if "),
                     tag("then if "),
                     tag("if "),
+                    tag("during any turn "),
+                    tag("during a turn "),
                 )),
             )
             .parse(i)
@@ -2283,6 +2290,112 @@ pub(crate) fn ability_condition_to_static_condition(
     }
 }
 
+/// CR 508.1a + CR 608.2c: "you attacked with <filter> [this turn]" — a filtered
+/// attack-history gate. Recognizes the count form ("N or more creatures",
+/// filter `None`), the token / commander / self forms, and a trailing type or
+/// subtype phrase, producing a `QuantityCheck` against the (optionally filtered)
+/// `AttackedThisTurn` count. Covers Neyali ("a token"), Neriv ("a commander"),
+/// Boros Strike-Captain ("three or more creatures"), Goblin Researcher ("~").
+fn parse_attacked_with_filter_condition(text: &str) -> Option<AbilityCondition> {
+    let trimmed = text.trim().trim_end_matches('.').trim();
+    let lower = trimmed.to_lowercase();
+    // Strip "you['ve] attacked with ".
+    let ((), after_verb) = nom_on_lower(trimmed, &lower, |i| {
+        value(
+            (),
+            preceded(
+                alt((tag::<_, _, OracleError<'_>>("you've "), tag("you "))),
+                tag("attacked with "),
+            ),
+        )
+        .parse(i)
+    })?;
+    // Strip an optional trailing " this turn".
+    let after_verb = after_verb.trim();
+    let after_lower = after_verb.to_lowercase();
+    // CR 508.6: drop a trailing " this turn" if present. The closure yields `()`
+    // (the `take_until` prefix borrows the lowercase local and must not escape);
+    // the body is sliced from the ORIGINAL text using the mapped-back remainder.
+    let body = match nom_on_lower(after_verb, &after_lower, |i| {
+        value(
+            (),
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" this turn"),
+                tag(" this turn"),
+            ),
+        )
+        .parse(i)
+    }) {
+        Some(((), remainder)) => {
+            &after_verb[..after_verb.len() - remainder.len() - " this turn".len()]
+        }
+        None => after_verb,
+    }
+    .trim();
+    let body_lower = body.to_lowercase();
+
+    let make = |filter: Option<TargetFilter>, count: i32| {
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::AttackedThisTurn { filter },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: count },
+        })
+    };
+
+    // Count form: "<N> [or more] creature(s)" — unfiltered attacker count.
+    if let Ok((rest, n)) = nom_primitives::parse_number(body_lower.as_str()) {
+        let rest = rest.trim_start();
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>("or more "))
+            .parse(rest)
+            .ok()?;
+        if matches!(rest.trim(), "creatures" | "creature") {
+            return make(None, n as i32);
+        }
+    }
+
+    // Self-reference (Goblin Researcher "attacked with ~").
+    if matches!(body_lower.as_str(), "~" | "this creature" | "it") {
+        return make(Some(TargetFilter::SelfRef), 1);
+    }
+
+    // Drop a leading article, then recognize token / commander / a type or
+    // subtype phrase. A bare "a creature" is the unfiltered count of 1.
+    let noun = nom_on_lower(body, &body_lower, |i| {
+        value((), alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))).parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(body)
+    .trim();
+    let noun_lower = noun.to_lowercase();
+    if noun_lower == "creature" {
+        return make(None, 1);
+    }
+    if noun_lower == "token" {
+        return make(
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Token]),
+            )),
+            1,
+        );
+    }
+    if noun_lower == "commander" {
+        return make(
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::IsCommander]),
+            )),
+            1,
+        );
+    }
+    // Type / subtype phrase ("a Wolf or Werewolf", etc.).
+    let (filter, rest) = parse_type_phrase(noun);
+    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return make(Some(filter), 1);
+    }
+    None
+}
+
 pub(super) fn try_nom_condition_as_ability_condition(
     text: &str,
     ctx: &mut ParseContext,
@@ -2290,6 +2403,11 @@ pub(super) fn try_nom_condition_as_ability_condition(
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 508.1a: "you attacked with <filter> [this turn]" filtered attack-history gate.
+    if let Some(condition) = parse_attacked_with_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
 
     if let Some(condition) = parse_you_controlled_parent_target_condition(lower.as_str()) {
         return Some(condition);
@@ -3501,6 +3619,49 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
+
+    /// CR 508.1a: filtered attack-history condition — "you attacked with <X>"
+    /// resolves to a QuantityCheck over the (optionally filtered) AttackedThisTurn
+    /// count. Covers the count, commander, and self-reference forms.
+    #[test]
+    fn attacked_with_filter_condition_forms() {
+        // Count form: "three or more creatures" → unfiltered, GE 3.
+        assert_eq!(
+            parse_attacked_with_filter_condition("you attacked with three or more creatures"),
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn { filter: None },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            })
+        );
+        // Commander form → IsCommander filter, GE 1.
+        let cmdr = parse_attacked_with_filter_condition("you attacked with a commander");
+        assert!(matches!(
+            cmdr,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        filter: Some(TargetFilter::Typed(ref tf)),
+                    },
+                },
+                ..
+            }) if tf.properties.contains(&FilterProp::IsCommander)
+        ));
+        // Self-reference (Goblin Researcher) → SelfRef filter.
+        assert!(matches!(
+            parse_attacked_with_filter_condition("you attacked with ~"),
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::AttackedThisTurn {
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                },
+                ..
+            })
+        ));
+    }
 
     /// CR 608.2c + CR 608.2d: When the leading `If <X>, ` has no typed
     /// recognizer AND the body begins with `"you may "`, the structural

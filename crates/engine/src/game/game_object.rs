@@ -12,7 +12,7 @@ use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
-use crate::types::game_state::{GameState, LKISnapshot};
+use crate::types::game_state::{AttackDeclarationRecord, GameState, LKISnapshot};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
@@ -1063,9 +1063,8 @@ impl GameObject {
         }
     }
 
-    /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
-    /// by source-qualified "mana spent to cast" effects.
-    pub fn snapshot_for_mana_spent(&self) -> LKISnapshot {
+    /// Capture public object characteristics for event-time look-back queries.
+    pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
             power: self.power,
@@ -1084,6 +1083,24 @@ impl GameObject {
             colors: self.color.clone(),
             chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
+        }
+    }
+
+    /// CR 106.3 + CR 601.2h: Capture the public source characteristics needed
+    /// by source-qualified "mana spent to cast" effects.
+    pub fn snapshot_for_mana_spent(&self) -> LKISnapshot {
+        self.snapshot_public_characteristics()
+    }
+
+    /// CR 508.1a: Capture the public characteristics of a creature when it is
+    /// declared as an attacker, so later "attacked with <quality> this turn"
+    /// queries do not depend on the attacker still existing.
+    pub fn snapshot_for_attack_declaration(&self, object_id: ObjectId) -> AttackDeclarationRecord {
+        AttackDeclarationRecord {
+            object_id,
+            lki: self.snapshot_public_characteristics(),
+            is_token: self.is_token,
+            is_commander: self.is_commander,
         }
     }
 

@@ -18,11 +18,12 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
-    CounterAddedRecord, DamageRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
+    AttackDeclarationRecord, CounterAddedRecord, DamageRecord, GameState, LKISnapshot,
+    SpellCastRecord, ZoneChangeRecord,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::zones::Zone;
@@ -847,6 +848,49 @@ pub fn matches_target_filter_on_counter_added_record(
     obj.keywords = record.keywords.clone();
     obj.color = record.colors.clone();
     obj.counters = record.counters.clone();
+
+    filter_inner_for_object(
+        state,
+        &obj,
+        record.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
+        ControllerLookup::LiveOrLki,
+    )
+}
+
+/// CR 508.1a + CR 608.2c: Check whether an attacker declaration snapshot
+/// matches a target filter using declaration-time characteristics.
+pub fn matches_target_filter_on_attack_declaration_record(
+    state: &GameState,
+    record: &AttackDeclarationRecord,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let mut obj = GameObject::new(
+        record.object_id,
+        CardId(0),
+        record.lki.owner,
+        record.lki.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = record.lki.controller;
+    obj.power = record.lki.power;
+    obj.toughness = record.lki.toughness;
+    obj.base_power = record.lki.base_power;
+    obj.base_toughness = record.lki.base_toughness;
+    obj.card_types.core_types = record.lki.card_types.clone();
+    obj.card_types.subtypes = record.lki.subtypes.clone();
+    obj.card_types.supertypes = record.lki.supertypes.clone();
+    obj.mana_cost = ManaCost::generic(record.lki.mana_value);
+    obj.keywords = record.lki.keywords.clone();
+    obj.color = record.lki.colors.clone();
+    obj.counters = record.lki.counters.clone();
+    obj.is_token = record.is_token;
+    obj.is_commander = record.is_commander;
 
     filter_inner_for_object(
         state,
@@ -2452,16 +2496,10 @@ fn matches_filter_prop(
     source: &SourceContext<'_>,
 ) -> bool {
     match prop {
-        // CR 111.1: Token identity of the live object.
-        FilterProp::Token => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| obj.is_token),
-        // CR 111.1: Nontoken identity of the live object.
-        FilterProp::NonToken => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| !obj.is_token),
+        // CR 111.1: Token identity of the matched object or event-time snapshot.
+        FilterProp::Token => obj.is_token,
+        // CR 111.1: Nontoken identity of the matched object or event-time snapshot.
+        FilterProp::NonToken => !obj.is_token,
         FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers

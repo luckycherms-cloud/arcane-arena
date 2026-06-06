@@ -1966,7 +1966,7 @@ pub fn convert_player_predicate_ability(
             require_you_player(player, "Players::AttackedThisTurn (ability)")?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn,
+                    qty: QuantityRef::AttackedThisTurn { filter: None },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2312,7 +2312,7 @@ pub fn convert_player_predicate_static(
             require_you_player(player, "Players::AttackedThisTurn (static)")?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::AttackedThisTurn,
+                    qty: QuantityRef::AttackedThisTurn { filter: None },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },

@@ -2155,7 +2155,7 @@ fn parse_for_each_clause_with_they_controller(
     .parse(clause)
     {
         if rest.is_empty() {
-            return Some(QuantityRef::AttackedThisTurn);
+            return Some(QuantityRef::AttackedThisTurn { filter: None });
         }
     }
 
@@ -2642,13 +2642,13 @@ mod tests {
     }
 
     /// Collision guard: "creature you attacked WITH this turn" (the source-
-    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn`
+    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn { filter: None }`
     /// — the " with" subject distinguishes it from the player-population
     /// "opponents you attacked" phrase.
     #[test]
     fn creature_you_attacked_with_this_turn_stays_attacked_this_turn() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
     }
 
     #[test]
@@ -2667,7 +2667,7 @@ mod tests {
     #[test]
     fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
         let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
-        assert_eq!(qty, QuantityRef::AttackedThisTurn);
+        assert_eq!(qty, QuantityRef::AttackedThisTurn { filter: None });
     }
 
     #[test]

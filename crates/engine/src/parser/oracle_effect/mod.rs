@@ -6934,7 +6934,11 @@ fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
         // Strip "if " prefix before passing to the condition parser.
         let condition_lower = condition_text.to_lowercase();
         let cond_body = nom_on_lower(&condition_text, &condition_lower, |i| {
-            value((), tag("if ")).parse(i)
+            value(
+                (),
+                alt((tag("if "), tag("during any turn "), tag("during a turn "))),
+            )
+            .parse(i)
         })
         .map(|((), rest)| rest)
         .unwrap_or(&condition_text)

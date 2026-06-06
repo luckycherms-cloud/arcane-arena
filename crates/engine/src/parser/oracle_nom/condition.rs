@@ -2916,7 +2916,7 @@ fn parse_youve_life_history_condition(input: &str) -> OracleResult<'_, StaticCon
 fn parse_youve_combat_history_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you've attacked this turn" / "you've attacked with a creature this turn"
     value(
-        make_quantity_ge(QuantityRef::AttackedThisTurn, 1),
+        make_quantity_ge(QuantityRef::AttackedThisTurn { filter: None }, 1),
         alt((
             tag("attacked with a creature this turn"),
             tag("attacked this turn"),
@@ -3259,7 +3259,7 @@ fn parse_combat_history_condition(input: &str) -> OracleResult<'_, StaticConditi
     alt((
         // "you attacked this turn" (without "you've" prefix)
         value(
-            make_quantity_ge(QuantityRef::AttackedThisTurn, 1),
+            make_quantity_ge(QuantityRef::AttackedThisTurn { filter: None }, 1),
             alt((
                 tag("you attacked with a creature this turn"),
                 tag("you attacked this turn"),
@@ -4383,7 +4383,11 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
             tag("lose life this turn"),
         ),
         value(
-            make_quantity_comparison(QuantityRef::AttackedThisTurn, Comparator::EQ, 0),
+            make_quantity_comparison(
+                QuantityRef::AttackedThisTurn { filter: None },
+                Comparator::EQ,
+                0,
+            ),
             tag("attack this turn"),
         ),
         // CR 606.1 + CR 603.4: "you didn't activate a loyalty ability of a
@@ -9046,7 +9050,7 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn
+                        qty: QuantityRef::AttackedThisTurn { filter: None }
                     }
                 ));
                 assert_eq!(comparator, Comparator::EQ);

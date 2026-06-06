@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_on_counter_added_record,
-    matches_target_filter_on_damage_record_source, matches_target_filter_on_zone_change_record,
-    player_matches_target_filter_in_state, spell_record_matches_filter, type_filter_matches,
-    FilterContext,
+    matches_target_filter, matches_target_filter_on_attack_declaration_record,
+    matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
+    matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
+    spell_record_matches_filter, type_filter_matches, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -303,7 +303,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -471,7 +471,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::ChosenNumber
-        | QuantityRef::AttackedThisTurn
+        | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastLastTurn
@@ -1979,12 +1979,34 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 508.1a: Count creatures the controller attacked with this turn.
-        QuantityRef::AttackedThisTurn => state
-            .attacking_creatures_this_turn
-            .get(&controller)
-            .copied()
-            .map(u32_to_i32_saturating)
-            .unwrap_or(0),
+        QuantityRef::AttackedThisTurn { filter } => match filter {
+            // Bare form — total attackers this turn (per-player tally).
+            None => state
+                .attacking_creatures_this_turn
+                .get(&controller)
+                .copied()
+                .map(u32_to_i32_saturating)
+                .unwrap_or(0),
+            // Filtered form — this-turn attackers controlled by the player that
+            // match `filter` (Neyali "a token", Neriv "a commander", Goblin
+            // Researcher "~", etc.), resolved against declaration-time snapshots
+            // so attackers that died or otherwise left the battlefield still count.
+            Some(filter) => usize_to_i32_saturating(
+                state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.lki.controller == controller
+                            && matches_target_filter_on_attack_declaration_record(
+                                state,
+                                record,
+                                filter,
+                                &filter_ctx,
+                            )
+                    })
+                    .count(),
+            ),
+        },
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -3716,10 +3738,85 @@ mod tests {
         state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
 
         let qty = QuantityExpr::Ref {
-            qty: QuantityRef::AttackedThisTurn,
+            qty: QuantityRef::AttackedThisTurn { filter: None },
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    #[test]
+    fn resolve_filtered_attacked_this_turn_uses_declaration_snapshot_after_attacker_leaves() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec!["Goblin".to_string()];
+        }
+
+        let non_token = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Knight".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&non_token)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        crate::game::combat::declare_attackers(
+            &mut state,
+            &[
+                (
+                    token,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    non_token,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap();
+        state.objects.remove(&token);
+
+        let token_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::Token]),
+                )),
+            },
+        };
+        let goblin_attackers = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn {
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature, TypeFilter::Subtype("Goblin".into())],
+                    controller: None,
+                    properties: vec![],
+                })),
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity(&state, &token_attackers, PlayerId(0), ObjectId(1)),
+            1
+        );
+        assert_eq!(
+            resolve_quantity(&state, &goblin_attackers, PlayerId(0), ObjectId(1)),
+            1
+        );
     }
 
     #[test]

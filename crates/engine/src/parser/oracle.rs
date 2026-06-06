@@ -4568,6 +4568,44 @@ mod tests {
         parse_oracle_text(text, name, &keyword_names, &types, &subtypes)
     }
 
+    /// CR 508.1a + CR 508.6: "During any turn you attacked with <filter>, you
+    /// may play that card" must gate the play permission on a (filtered)
+    /// AttackedThisTurn condition instead of dropping the clause to
+    /// Unimplemented. Neyali (token) and Boros Strike-Captain (count) both
+    /// produce a gated CastFromZone with no Unimplemented chunk.
+    #[test]
+    fn attacked_with_filter_gates_play_permission() {
+        let neyali = parse(
+            "Whenever one or more tokens you control attack a player, exile the top card of your library. During any turn you attacked with a token, you may play that card.",
+            "Neyali, Suns' Vanguard",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let s = format!("{:?}", neyali.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn") && s.contains("Token"), // allow-noncombinator: Debug-string assertion
+            "expected a token-filtered AttackedThisTurn gate, got {s}"
+        );
+
+        let boros = parse(
+            "Battalion \u{2014} Whenever this creature and at least two other creatures attack, exile the top card of your library. During any turn you attacked with three or more creatures, you may play that card.",
+            "Boros Strike-Captain",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let s = format!("{:?}", boros.triggers);
+        // allow-noncombinator: test assertions over Debug-formatted AST, not parser dispatch.
+        assert!(!s.contains("Unimplemented"), "no Unimplemented chunk: {s}");
+        assert!(
+            s.contains("AttackedThisTurn"), // allow-noncombinator: Debug-string assertion
+            "expected an AttackedThisTurn gate, got {s}"
+        );
+    }
+
     /// Parse with raw MTGJSON keyword names (for testing keyword extraction).
     fn parse_with_keyword_names(
         text: &str,
@@ -14412,7 +14450,7 @@ mod tests {
                 inner.as_ref(),
                 AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::AttackedThisTurn,
+                        qty: QuantityRef::AttackedThisTurn { filter: None },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
