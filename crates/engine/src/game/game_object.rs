@@ -806,6 +806,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub mana_spent_to_cast_amount: u32,
 
+    /// CR 702.150a: Number of this object's Phyrexian mana symbols that the
+    /// caster chose to pay with **life** (2 life each). Set at cast finalization
+    /// from the `ShardChoice::PayLife` selections; read when the object enters as
+    /// a planeswalker with `Keyword::Compleated` to reduce its entering loyalty by
+    /// two per symbol. Like `mana_spent_to_cast_amount`, this is a historical cast
+    /// fact that persists through resolution; initialized to 0 by `GameObject::new`.
+    #[serde(default, skip_serializing_if = "is_zero_u32_field")]
+    pub phyrexian_life_paid: u32,
+
     /// CR 106.3 + CR 601.2h: Source snapshots for each mana spent to cast this
     /// object. One entry per spent mana lets source-qualified dynamic quantities
     /// count "mana from a Cave/Treasure/artifact source" without depending on
@@ -1048,6 +1057,7 @@ impl GameObject {
             mana_spent_to_cast: false,
             colors_spent_to_cast: ColoredManaCount::default(),
             mana_spent_to_cast_amount: 0,
+            phyrexian_life_paid: 0,
             mana_spent_source_snapshots: Vec::new(),
             phase_status: PhaseStatus::PhasedIn,
         }
@@ -1156,6 +1166,10 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
+        // CR 400.7 + CR 702.150a: Compleated's life-payment count belongs to
+        // the cast that created this permanent. Once it leaves the battlefield,
+        // a later entry has no memory of that payment.
+        self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
         // CR 702.xxx: Prepared (Strixhaven) is a battlefield-only designation —

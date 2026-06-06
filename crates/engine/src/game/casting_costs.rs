@@ -3871,6 +3871,25 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.150a: Record how many of this spell's Phyrexian mana symbols are
+    // being paid with life. A compleated planeswalker entering from this spell
+    // exposes this as an intrinsic AddCounter replacement so it can order with
+    // Doubling Season-class modifiers (CR 616.1). Harmless for non-compleated
+    // spells (the field is only read for `Keyword::Compleated` planeswalkers).
+    {
+        let phyrexian_life_paid = phyrexian_choices
+            .map(|choices| {
+                choices
+                    .iter()
+                    .filter(|c| matches!(**c, crate::types::game_state::ShardChoice::PayLife))
+                    .count() as u32
+            })
+            .unwrap_or(0);
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.phyrexian_life_paid = phyrexian_life_paid;
+        }
+    }
+
     // CR 601.3d + CR 702.8a: When the cast was authorized as-though-it-had-flash
     // via a `SpellCastingOption` whose `condition` is target-dependent (e.g.,
     // Timely Ward — "you may cast this spell as though it had flash if it

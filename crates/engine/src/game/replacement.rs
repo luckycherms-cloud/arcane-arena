@@ -33,6 +33,22 @@ const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
 /// permanent (the `source` is the would-be-destroyed host, not the Aura). Reserved
 /// candidate id so the CR 616 replacement-ordering pipeline owns its application.
 const UMBRA_ARMOR_DESTROY_INDEX: usize = usize::MAX - 2;
+/// CR 702.150a: Compleated — virtual loyalty-counter replacement keyed on the
+/// resolving planeswalker. Compleated is an intrinsic cast-payment replacement,
+/// not a battlefield `ReplacementDefinition`, but it must still participate in
+/// CR 616 ordering against AddCounter replacements such as Doubling Season.
+const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
+
+fn compleated_replacement_id(object_id: ObjectId) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: COMPLEATED_LOYALTY_INDEX,
+    }
+}
+
+fn is_compleated_replacement(rid: ReplacementId) -> bool {
+    rid.index == COMPLEATED_LOYALTY_INDEX
+}
 
 fn umbra_armor_replacement_id(aura_id: ObjectId) -> ReplacementId {
     ReplacementId {
@@ -85,6 +101,14 @@ fn object_has_shield_counter(state: &GameState, object_id: ObjectId) -> bool {
         .get(&object_id)
         .and_then(|obj| obj.counters.get(&CounterType::Shield))
         .is_some_and(|count| *count > 0)
+}
+
+fn compleated_life_paid(state: &GameState, object_id: ObjectId) -> Option<u32> {
+    state.objects.get(&object_id).and_then(|obj| {
+        (obj.phyrexian_life_paid > 0
+            && obj.has_keyword(&crate::types::keywords::Keyword::Compleated))
+        .then_some(obj.phyrexian_life_paid)
+    })
 }
 
 fn is_functioning_umbra_armor_aura(state: &GameState, aura_id: ObjectId) -> bool {
@@ -142,6 +166,43 @@ pub(crate) fn consume_shield_counter(
         count: 1,
     });
     true
+}
+
+fn apply_compleated_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rid: ReplacementId,
+    events: &mut Vec<GameEvent>,
+) -> ProposedEvent {
+    let Some(life_paid) = compleated_life_paid(state, rid.source) else {
+        return event;
+    };
+    match event {
+        ProposedEvent::AddCounter {
+            actor,
+            object_id,
+            counter_type: CounterType::Loyalty,
+            count,
+            mut applied,
+        } if object_id == rid.source => {
+            applied.insert(rid);
+            if let Some(obj) = state.objects.get_mut(&rid.source) {
+                obj.phyrexian_life_paid = 0;
+            }
+            events.push(GameEvent::ReplacementApplied {
+                source_id: rid.source,
+                event_type: ReplacementEvent::AddCounter.to_string(),
+            });
+            ProposedEvent::AddCounter {
+                actor,
+                object_id,
+                counter_type: CounterType::Loyalty,
+                count: count.saturating_sub(life_paid.saturating_mul(2)),
+                applied,
+            }
+        }
+        other => other,
+    }
 }
 
 /// CR 614.1: Replacement effects modify events as they would occur.
@@ -349,6 +410,9 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 }
 
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
+    if is_compleated_replacement(rid) {
+        return "Compleated: enter with fewer loyalty counters".to_string();
+    }
     if is_umbra_armor_replacement(rid) {
         return state
             .objects
@@ -3115,6 +3179,28 @@ pub fn find_applicable_replacements(
         _ => {}
     }
 
+    // CR 702.150a: Compleated replaces the loyalty counters a permanent enters
+    // with when life was paid for its Phyrexian mana symbols. In this engine,
+    // ETB counters are delivered through the shared AddCounter replacement
+    // authority (`apply_etb_counters`), so the intrinsic Compleated replacement
+    // is exposed as a virtual AddCounter candidate there. This lets it order
+    // correctly with Doubling Season-class count modifiers (CR 616.1).
+    if let ProposedEvent::AddCounter {
+        object_id,
+        counter_type: CounterType::Loyalty,
+        count,
+        ..
+    } = event
+    {
+        let rid = compleated_replacement_id(*object_id);
+        if *count > 0
+            && compleated_life_paid(state, *object_id).is_some()
+            && !event.already_applied(&rid)
+        {
+            candidates.push(rid);
+        }
+    }
+
     // CR 702.89a: Umbra armor — a destroy of a permanent enchanted by an Umbra is
     // a candidate for the virtual umbra-armor replacement. Offered independently of
     // the shield-counter match above so a permanent carrying both a shield counter
@@ -3904,6 +3990,10 @@ fn apply_single_replacement(
         return apply_empty_mana_pool_replacement(state, proposed, rid, events);
     }
 
+    if is_compleated_replacement(rid) {
+        return Ok(apply_compleated_replacement(state, proposed, rid, events));
+    }
+
     if let Some(kind) = shield_counter_replacement_kind(rid) {
         return apply_shield_counter_replacement(state, proposed, rid, kind, events);
     }
@@ -4304,6 +4394,13 @@ fn candidate_materiality(
     rid: ReplacementId,
     proposed_to: Option<Zone>,
 ) -> CandidateMateriality {
+    if is_compleated_replacement(rid) {
+        return CandidateMateriality::Writes {
+            field: EventField::Count,
+            commute: CommuteClass::Subtractive,
+        };
+    }
+
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => return CandidateMateriality::Unconditional,
         Some(ShieldCounterReplacementKind::Damage) => {
@@ -4746,10 +4843,13 @@ mod tests {
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr,
-        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
+        QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
+        TargetRef,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{EtbTapState, TokenSpec};
     use crate::types::replacements::ReplacementEvent;
@@ -5115,6 +5215,69 @@ mod tests {
             panic!("expected NeedsChoice for material ordering, got {result:?}");
         };
         assert_eq!(player, PlayerId(0));
+    }
+
+    fn compleated_doubling_order_result(choice: usize) -> u32 {
+        let compleated = ObjectId(10);
+        let doubling_season = ObjectId(20);
+
+        let mut state = GameState::new_two_player(42);
+        let mut walker = GameObject::new(
+            compleated,
+            CardId(1),
+            PlayerId(0),
+            "Compleated Walker".to_string(),
+            Zone::Battlefield,
+        );
+        walker.card_types.core_types.push(CoreType::Planeswalker);
+        walker.keywords.push(Keyword::Compleated);
+        walker.phyrexian_life_paid = 3;
+        state.objects.insert(compleated, walker);
+        state.battlefield.push_back(compleated);
+
+        let mut doubler = GameObject::new(
+            doubling_season,
+            CardId(2),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        doubler.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .quantity_modification(QuantityModification::Double)]
+            .into();
+        state.objects.insert(doubling_season, doubler);
+        state.battlefield.push_back(doubling_season);
+
+        let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: compleated,
+            counter_type: CounterType::Loyalty,
+            count: 5,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected Compleated/Doubling replacement choice, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let result = continue_replacement(&mut state, choice, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::AddCounter { count, .. }) = result else {
+            panic!("expected accepted AddCounter after replacement choice, got {result:?}");
+        };
+        count
+    }
+
+    #[test]
+    fn compleated_and_doubling_season_order_is_material() {
+        // CR 702.150a + CR 616.1: Compleated's loyalty reduction and a Doubling
+        // Season-class counter doubler do not commute. Loyalty 5 with three
+        // Phyrexian symbols paid by life is either (5 - 6) * 2 = 0 or
+        // (5 * 2) - 6 = 4 depending on the affected player's chosen order.
+        assert_eq!(compleated_doubling_order_result(0), 0);
+        assert_eq!(compleated_doubling_order_result(1), 4);
     }
 
     #[test]

@@ -31085,6 +31085,145 @@ mod tests {
         );
     }
 
+    fn create_compleated_planeswalker_in_hand(
+        state: &mut GameState,
+        player: PlayerId,
+        shards: Vec<ManaCostShard>,
+        loyalty: u32,
+    ) -> ObjectId {
+        let obj_id = create_object(
+            state,
+            CardId(0xC0DE),
+            player,
+            "Compleated Walker".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.base_card_types = obj.card_types.clone();
+        obj.loyalty = Some(loyalty);
+        obj.base_loyalty = Some(loyalty);
+        obj.mana_cost = ManaCost::Cost { shards, generic: 0 };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.keywords.push(Keyword::Compleated);
+        obj.base_keywords.push(Keyword::Compleated);
+        obj_id
+    }
+
+    fn resolved_compleated_walker_loyalty(state: &GameState) -> u32 {
+        let pw_id = state
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.has_keyword(&Keyword::Compleated))
+            })
+            .expect("a compleated walker must be on the battlefield after resolution");
+        state.objects[&pw_id]
+            .counters
+            .get(&crate::types::counter::CounterType::Loyalty)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 702.150a: A compleated planeswalker cast by paying life for its
+    /// Phyrexian symbols enters with two fewer loyalty per symbol. Loyalty 5 and
+    /// two {U/P} both paid with life → enters with 5 - 2*2 = 1.
+    #[test]
+    fn compleated_planeswalker_paying_life_enters_with_reduced_loyalty() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::ShardChoice;
+
+        let mut state = setup_game_at_main_phase();
+        let spell = create_compleated_planeswalker_in_hand(
+            &mut state,
+            PlayerId(0),
+            vec![ManaCostShard::PhyrexianBlue, ManaCostShard::PhyrexianBlue],
+            5,
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0xC0DE),
+                targets: Vec::new(),
+            },
+        )
+        .expect("announce cast");
+        assert!(
+            matches!(result.waiting_for, WaitingFor::PhyrexianPayment { .. }),
+            "empty pool should pause for Phyrexian life payment, got {:?}",
+            result.waiting_for
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SubmitPhyrexianChoices {
+                choices: vec![ShardChoice::PayLife, ShardChoice::PayLife],
+            },
+        )
+        .expect("submit PayLife x2");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            resolved_compleated_walker_loyalty(&state),
+            1,
+            "CR 702.150a: loyalty 5 minus 2 per life-paid Phyrexian symbol (x2) = 1"
+        );
+    }
+
+    /// CR 702.150a: Paying the Phyrexian symbols with MANA (not life) leaves the
+    /// compleated planeswalker's loyalty unreduced.
+    #[test]
+    fn compleated_planeswalker_paying_mana_enters_with_full_loyalty() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::game_state::ShardChoice;
+
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 2);
+        let spell = create_compleated_planeswalker_in_hand(
+            &mut state,
+            PlayerId(0),
+            vec![ManaCostShard::PhyrexianBlue, ManaCostShard::PhyrexianBlue],
+            5,
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(0xC0DE),
+                targets: Vec::new(),
+            },
+        )
+        .expect("announce cast");
+        // With mana available the shards may surface a ManaOrLife choice; pay mana.
+        if matches!(result.waiting_for, WaitingFor::PhyrexianPayment { .. }) {
+            apply_as_current(
+                &mut state,
+                GameAction::SubmitPhyrexianChoices {
+                    choices: vec![ShardChoice::PayMana, ShardChoice::PayMana],
+                },
+            )
+            .expect("submit PayMana x2");
+        }
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            resolved_compleated_walker_loyalty(&state),
+            5,
+            "paying mana (not life) for the Phyrexian symbols leaves loyalty at 5"
+        );
+    }
+
     /// CR 107.4f + CR 118.3: With insufficient life and no mana of the color,
     /// the Phyrexian cast is denied.
     #[test]

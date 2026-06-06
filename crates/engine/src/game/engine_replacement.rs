@@ -7,6 +7,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::replacements::ReplacementEvent;
@@ -955,6 +956,18 @@ pub(super) fn apply_etb_counters(
             *count,
             events,
         );
+    }
+    let replacement_choice_for_object = state
+        .pending_replacement
+        .as_ref()
+        .and_then(|pending| pending.proposed.affected_object_id())
+        == Some(object_id);
+    if !replacement_choice_for_object {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            if obj.has_keyword(&Keyword::Compleated) {
+                obj.phyrexian_life_paid = 0;
+            }
+        }
     }
 }
 
