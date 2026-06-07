@@ -1597,6 +1597,14 @@ fn infer_pronoun_unless_payer(
     if scan_contains(effect_before_unless, "each opponent ") {
         return Some(TargetFilter::ScopedPlayer);
     }
+    // CR 608.2b + CR 115.4: "... deals damage to target opponent/player
+    // unless that player/they sacrifice ..." — the chosen player target pays
+    // the unless cost (Demanding Dragon, Tergrid's Lantern-style punishers).
+    if scan_contains(effect_before_unless, "target opponent")
+        || scan_contains(effect_before_unless, "target player")
+    {
+        return Some(TargetFilter::Player);
+    }
     if scan_contains(effect_before_unless, "creature's controller ") {
         return Some(TargetFilter::ParentTargetController);
     }
@@ -18669,6 +18677,25 @@ mod tests {
             panic!("sacrifice target should be typed, got {target:?}");
         };
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn demanding_dragon_etb_unless_sacrifice_binds_target_player_payer() {
+        let def = parse_trigger_line(
+            "When this creature enters, it deals 5 damage to target opponent unless that player sacrifices a creature of their choice.",
+            "Demanding Dragon",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(
+            unless_pay.payer,
+            TargetFilter::Player,
+            "target-opponent punishers bind unless payer to the chosen player target (#2422)"
+        );
+        assert!(
+            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            "cost should be Sacrifice, got {:?}",
+            unless_pay.cost
+        );
     }
 
     #[test]
