@@ -140,6 +140,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
         | WaitingFor::TimeTravelChoice { .. }
+        // CR 702.132a: Assist offer / payment — casting-payment-adjacent choices,
+        // routed to the ability catch-all bucket like the other opt-in cast steps.
+        | WaitingFor::AssistChoosePlayer { .. }
+        | WaitingFor::AssistPayment { .. }
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }

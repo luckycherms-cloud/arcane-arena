@@ -738,6 +738,13 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
+        // CR 702.132a: Assist — default to not seeking help (decline the offer)
+        // and, if asked to contribute, contribute nothing.
+        WaitingFor::AssistChoosePlayer { .. } => {
+            Some(GameAction::ChooseAssistPlayer { player: None })
+        }
+        WaitingFor::AssistPayment { .. } => Some(GameAction::CommitAssistPayment { generic: 0 }),
+
         // ChooseObjectsIntoTrackedSet: default to declining (empty selection).
         WaitingFor::ChooseObjectsSelection { .. } => Some(GameAction::SelectTargets {
             targets: Vec::new(),

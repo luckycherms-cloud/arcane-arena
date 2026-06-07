@@ -351,6 +351,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseUntap { .. }
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAssistPlayer { .. }
+        | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
         | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
