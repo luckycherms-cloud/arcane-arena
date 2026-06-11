@@ -30055,6 +30055,45 @@ mod tests {
         );
     }
 
+    /// CR 702.170c-d: the OTJ Plot-grant cards (Make Your Own Luck, Lilah,
+    /// Kellan Joins Up, Jace Reawakened) gate the grant behind "If you do," —
+    /// "You may exile a card. If you do, it becomes plotted." The optional
+    /// "if you do," prefix must still route to the `BecomesPlotted` continuation
+    /// (CastingPermission::Plotted), not fall through to an `Effect:become` gap.
+    #[test]
+    fn parse_if_you_do_it_becomes_plotted_grants_plotted_permission() {
+        let def = parse_effect_chain(
+            "You may exile a nonland card from among them. If you do, it becomes plotted.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        ));
+
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .expect("if-you-do plot grant sub-ability");
+        let Effect::GrantCastingPermission {
+            permission, target, ..
+        } = grant.effect.as_ref()
+        else {
+            panic!("expected GrantCastingPermission, got {:?}", grant.effect);
+        };
+        assert_eq!(*permission, CastingPermission::Plotted { turn_plotted: 0 });
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+    }
+
     #[test]
     fn advanced_reconstruction_body_uses_random_exile_and_tracked_permission() {
         let def = parse_effect_chain(
