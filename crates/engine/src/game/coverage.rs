@@ -1695,6 +1695,7 @@ fn fmt_core_type(ct: &CoreType) -> &'static str {
         CoreType::Plane => "plane",
         CoreType::Phenomenon => "phenomenon",
         CoreType::Scheme => "scheme",
+        CoreType::Conspiracy => "conspiracy",
     }
 }
 
