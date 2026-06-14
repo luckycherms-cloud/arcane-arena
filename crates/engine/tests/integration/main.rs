@@ -92,6 +92,7 @@ mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
 mod invoke_calamity_free_cast;
+mod issue_1018_manifest_dread_choice;
 mod issue_1021_recurring_nightmare;
 mod issue_1023_oversold_cemetery;
 mod issue_1025_rishkars_expertise;
