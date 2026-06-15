@@ -10638,6 +10638,37 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     None
 }
 
+/// Parse an activated-ability qualifier phrase for "when you next … or activate
+/// an ability <qualifier>" delayed triggers.
+///
+/// Currently supports:
+/// - "with {x} in its activation cost" — CR 107.3 + CR 601.2f. Produces a
+///   `TargetFilter` containing `FilterProp::HasXInActivationCost`.
+///
+/// Shared with `oracle_effect::try_parse_when_next_event` — exposed as
+/// `pub(crate)` to keep the combinator definition in a single place.
+pub(crate) fn parse_post_activation_modifier(modifier: &str) -> Option<TargetFilter> {
+    use crate::types::ability::{FilterProp, TypedFilter};
+
+    if let Ok((rest, ())) = alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("with {x} in its activation cost"),
+        ),
+        value((), tag("with an {x} in its activation cost")),
+    ))
+    .parse(modifier)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInActivationCost]),
+            ));
+        }
+    }
+
+    None
+}
+
 /// Parse "whenever [subject] draw(s) [possessive] Nth card each turn" into a Drawn trigger
 /// with a NthDrawThisTurn constraint.
 /// Follows the same decomposition pattern as `try_parse_nth_spell_trigger`.
