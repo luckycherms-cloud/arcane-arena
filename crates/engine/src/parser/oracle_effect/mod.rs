@@ -4573,11 +4573,15 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
             parsed_clause(Effect::FlipCoin {
                 win_effect: Some(Box::new(branch_def)),
                 lose_effect: None,
+                // CR 705.2: branch-only flip stub; `consolidate_die_and_coin_defs`
+                // merges it into the preceding flip, which carries the flipper.
+                flipper: TargetFilter::Controller,
             })
         } else {
             parsed_clause(Effect::FlipCoin {
                 win_effect: None,
                 lose_effect: Some(Box::new(branch_def)),
+                flipper: TargetFilter::Controller,
             })
         };
     }
@@ -12002,6 +12006,18 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         {
             *target = Some(subject_filter);
         }
+        // CR 705.2: "that player flips a coin" / "target player flips a coin" —
+        // bind the named flipper so the flip (and its win/lose result) belongs to
+        // that player, not the source's controller (Mirrored Depths, Planar
+        // Chaos). The bare "flip a coin" lowering leaves `flipper = Controller`;
+        // only a genuine player subject overrides it. "each player flips a coin"
+        // routes through `player_scope` iteration instead (see `lower_clause_ast`),
+        // never reaching this arm with an "each player" class filter.
+        Effect::FlipCoin { flipper, .. } | Effect::FlipCoins { flipper, .. }
+            if *flipper == TargetFilter::Controller =>
+        {
+            *flipper = subject_filter;
+        }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
@@ -16841,15 +16857,19 @@ pub(crate) fn parse_effect_chain_ir(
                 let ir = parse_effect_chain_ir(effect_text, kind, ctx);
                 lower_effect_chain_ir(&ir)
             };
+            // CR 705.2: branch-only flip stub; the flipper rides the preceding
+            // bare flip and is preserved by `consolidate_die_and_coin_defs`.
             let flip_effect = if is_win {
                 Effect::FlipCoin {
                     win_effect: Some(Box::new(branch_def)),
                     lose_effect: None,
+                    flipper: TargetFilter::Controller,
                 }
             } else {
                 Effect::FlipCoin {
                     win_effect: None,
                     lose_effect: Some(Box::new(branch_def)),
+                    flipper: TargetFilter::Controller,
                 }
             };
             clauses.push(ClauseIr {
@@ -26622,6 +26642,7 @@ mod tests {
         let Effect::FlipCoin {
             win_effect,
             lose_effect,
+            ..
         } = &*def.effect
         else {
             panic!("expected FlipCoin, got {:?}", def.effect);
@@ -41893,6 +41914,7 @@ mod tests {
         let Effect::FlipCoin {
             win_effect: Some(win),
             lose_effect: Some(lose),
+            ..
         } = def.effect.as_ref()
         else {
             panic!("expected FlipCoin with both branches, got {:?}", def.effect);
@@ -44817,6 +44839,7 @@ mod tests {
             count,
             win_effect,
             lose_effect,
+            ..
         } = &*def.effect
         else {
             panic!("expected FlipCoins, got {:?}", def.effect);
@@ -44870,6 +44893,7 @@ mod tests {
                     count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
                     win_effect: None,
                     lose_effect: None,
+                    ..
                 }
             ),
             "expected FlipCoins count=2, got {:?}",
