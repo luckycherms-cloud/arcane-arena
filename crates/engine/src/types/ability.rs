@@ -2259,6 +2259,11 @@ pub enum FilterProp {
     Untapped,
     /// CR 702.171b: Matches permanents with the saddled designation.
     IsSaddled,
+    /// CR 310.8a + CR 310.8e: Matches battles whose protector satisfies
+    /// `controller` relative to the ability source ("each battle they protect").
+    ProtectorMatches {
+        controller: ControllerRef,
+    },
     /// CR 302.6 + CR 702.10b + CR 702.154a: Matches creatures that either have
     /// haste or have been under their controller's control continuously since
     /// that player's most recent turn began. Used by Enlist's tap eligibility.
