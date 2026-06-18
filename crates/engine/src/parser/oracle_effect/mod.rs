@@ -7906,6 +7906,8 @@ fn for_each_subject_application(
         " mill ",
         " discards ",
         " discard ",
+        " sacrifices ",
+        " sacrifice ",
         " scries ",
         " scry ",
         " surveils ",
@@ -8056,6 +8058,38 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
             amount,
             player: target,
         },
+        // CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent/player sacrifices
+        // a [typed] permanent ... for each X" (Urborg Justice, Din of the Fireherd,
+        // Rakdos Riteknife). The for-each interception strips the dynamic count
+        // early, so the fixed-count `inject_subject_target` Sacrifice arm never ran
+        // and the controller stayed null (→ the source's controller sacrifices).
+        // Mirror that arm here: stamp the subject player's controller onto the
+        // object filter (TargetPlayer for targeted subjects → surfaces a player
+        // target slot, read by `resolve_sacrifice_scope` at resolution) and rewrite
+        // any "they control" refs inside the count to the same player.
+        Effect::Sacrifice {
+            target: mut sac_target,
+            count: mut sac_count,
+            min_count,
+        } if player_filter_as_controller_ref(&target).is_some() => {
+            let ctrl = player_filter_as_controller_ref(&target).expect("guarded is_some");
+            let effective_ctrl = if is_targeted {
+                ControllerRef::TargetPlayer
+            } else {
+                ctrl
+            };
+            force_controller(&mut sac_target, effective_ctrl.clone());
+            rewrite_quantity_controller(
+                &mut sac_count,
+                ControllerRef::ScopedPlayer,
+                effective_ctrl,
+            );
+            Effect::Sacrifice {
+                target: sac_target,
+                count: sac_count,
+                min_count,
+            }
+        }
         other => other,
     }
 }
@@ -25447,6 +25481,134 @@ mod tests {
             ),
             "self-ref subject should produce SelfRef target"
         );
+    }
+
+    /// CR 115.1a/c + CR 701.21a + CR 608.2c: "Target opponent sacrifices a
+    /// creature ... for each <dynamic>" (Urborg Justice). The "for each" path
+    /// intercepts before the fixed-count `inject_subject_target` Sacrifice arm,
+    /// so without `thread_for_each_subject` rebinding the controller, YOU
+    /// sacrificed instead of the targeted opponent. Both the `TargetPlayer`
+    /// scope AND the dynamic `ZoneChangeCountThisTurn` count must survive.
+    /// Regression guard: revert either edit and the controller is `None`.
+    #[test]
+    fn for_each_sacrifice_target_opponent_dynamic_count_binds_target_player() {
+        let e = parse_effect(
+            "Target opponent sacrifices a creature of their choice for each creature put \
+             into your graveyard from the battlefield this turn.",
+        );
+        match e {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "sacrificed-creature filter must be scoped to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeCountThisTurn { .. }
+                        }
+                    ),
+                    "dynamic for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1a/c + CR 701.21a: Rakdos Riteknife activated ability — "Target
+    /// player sacrifices a permanent of their choice for each blood counter on
+    /// this Equipment." Bare "target player" lowers to `TargetFilter::Player`;
+    /// the for-each path must still bind `TargetPlayer` while keeping the
+    /// `CountersOn { Source, blood }` count.
+    #[test]
+    fn for_each_sacrifice_target_player_counters_on_source_binds_target_player() {
+        let e = parse_effect(
+            "Target player sacrifices a permanent of their choice for each blood counter \
+             on this Equipment.",
+        );
+        match e {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "sacrificed-permanent filter must be scoped to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn { .. }
+                        }
+                    ),
+                    "blood-counter for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1a/c + CR 701.21a: Din of the Fireherd leading leg — "Target
+    /// opponent sacrifices a creature for each black creature you control, then
+    /// ...". The first sacrifice leg must bind `TargetPlayer` with its dynamic
+    /// `ObjectCount` count. (The "then sacrifices a land" continuation is an
+    /// implicit-subject continuation handled by a separate compound path; see
+    /// the deviations note — its land filter is a pre-existing controller gap
+    /// out of scope of this AST-only for-each fix.)
+    #[test]
+    fn for_each_sacrifice_din_first_leg_binds_target_player() {
+        let sorcery = vec!["Sorcery".to_string()];
+        let pa = crate::parser::parse_oracle_text(
+            "Target opponent sacrifices a creature for each black creature you control, \
+             then sacrifices a land for each red creature you control.",
+            "Din of the Fireherd",
+            &[],
+            &sorcery,
+            &[],
+        );
+        let def = pa
+            .abilities
+            .first()
+            .expect("Din should produce a spell ability");
+        match &*def.effect {
+            Effect::Sacrifice { target, count, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::TargetPlayer),
+                    "Din first leg must scope to TargetPlayer, got {target:?}"
+                );
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "Din first leg for-each count must survive, got {count:?}"
+                );
+            }
+            other => panic!("expected Sacrifice in Din first leg, got {other:?}"),
+        }
+    }
+
+    /// No-regression: bare self "Sacrifice a creature for each X" (no targeted
+    /// subject) must NOT be rebound to a player target — the verb sits at offset
+    /// 0 so `for_each_subject_application` returns None and the controller stays
+    /// caster-relative (`None`/`You`).
+    #[test]
+    fn for_each_sacrifice_self_subject_unaffected() {
+        let e = parse_effect("sacrifice a creature for each creature you control");
+        match e {
+            Effect::Sacrifice { target, .. } => {
+                assert_ne!(
+                    target_filter_controller_ref(&target),
+                    Some(ControllerRef::TargetPlayer),
+                    "self sacrifice must not be rebound to TargetPlayer, got {target:?}"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
     }
 
     #[test]
