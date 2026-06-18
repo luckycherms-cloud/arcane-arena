@@ -5917,8 +5917,17 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let rest = rest_lower.trim().trim_end_matches('.');
-    // CR 603.7c: Prefer event context quantity for triggered effects.
-    let qty = super::oracle_quantity::parse_event_context_quantity(rest)?;
+    // CR 603.7c: Prefer event context quantity for triggered effects — keeps
+    // "that much"/"this way"/"that many" bound to the triggering-event amount.
+    // CR 121.1 + CR 107.1b: When the count is a static/dynamic CDA expression
+    // rather than an event-context reference (e.g. Narset's "spells you've cast
+    // this turn", Mr. Foxglove's "cards in defending player's hand minus the
+    // number of cards in your hand"), fall back to the arithmetic-aware
+    // `parse_cda_quantity` so binary minus / offset / fraction draw counts
+    // resolve instead of dropping the whole clause. Event-context FIRST is what
+    // preserves the trigger semantics for the cards that need them.
+    let qty = super::oracle_quantity::parse_event_context_quantity(rest)
+        .or_else(|| super::oracle_quantity::parse_cda_quantity(rest))?;
     match verb {
         EqualToQtyVerb::Mill => Some(parsed_clause(Effect::Mill {
             count: qty,
@@ -7360,6 +7369,79 @@ pub(crate) fn try_parse_balance_equalization(
         chain = prev;
     }
     Some(chain)
+}
+
+/// CR 121.1 + CR 402.1 + CR 608.2e: Whole-line interceptor for the "catch up to
+/// the player with the most cards in hand" equalize-upward draw (Tales of the
+/// Ancestors). Structured like [`try_parse_balance_equalization`]: the
+/// cross-player extremum operand is PRODUCED by the typed
+/// [`nom_quantity::parse_player_with_extremum_cards_in_hand`] combinator (not a
+/// literal tag), and a `Verify`-style structural guard (mirroring
+/// `parse_balance_arm_b`) rejects superficially similar text. Mirror of Balance
+/// with verb = draw, aggregate = Max, operand order swapped.
+///
+/// Operand order is load-bearing: `left` = the cross-player MAX
+/// (`HandSize { AllPlayers { Max } }`, frozen by the §8 clause-minimum snapshot
+/// per CR 608.2e so an earlier-APNAP draw can't raise it), `right` = the
+/// iterating player's own live `HandSize { ScopedPlayer }`. `left >= right`
+/// always holds because Max includes the iterating player; `Difference` takes
+/// `.abs()` and `Draw` clamps `.max(0)` (CR 107.1b), so the leader(s) draw 0 and
+/// the "with fewer cards in hand" subject restriction needs no separate
+/// `PlayerFilter`.
+pub(crate) fn try_parse_catch_up_draw(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+
+    let (extremum, _) = nom_on_lower(text, &lower, |input| {
+        // Subject restriction: fixed grammatical lead-in (the iterated subject).
+        let (input, _) = tag("each player with fewer cards in hand than ").parse(input)?;
+        // Extremum operand — PRODUCED by the typed combinator (not a literal tag).
+        let saved = input;
+        let (input, extremum) = nom_quantity::parse_player_with_extremum_cards_in_hand(input)?;
+        // CR 107.1b: Verify guard (mirror `parse_balance_arm_b`). The operand MUST
+        // be the cross-player hand-size MAX. Anything else (e.g. a Min/"fewest"
+        // look-alike) fails so the line falls through to the generic parser path.
+        if !matches!(
+            extremum,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    ..
+                }
+            }
+        ) {
+            return Err(nom::Err::Error(OracleError::new(
+                saved,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
+        // Verb clause + terminator.
+        let (input, _) = tag(" draws cards equal to the difference").parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, extremum))
+    })?;
+
+    // CR 121.1: each player draws `max - own` (clamped). Assemble the Difference
+    // from the parsed extremum (left = frozen Max) and the live per-player hand
+    // size (right = ScopedPlayer) — operand order load-bearing (see doc above).
+    let count = QuantityExpr::Difference {
+        left: Box::new(QuantityExpr::Ref { qty: extremum }),
+        right: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+        }),
+    };
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
+    );
+    // CR 101.4: APNAP fan-out over every player.
+    def.player_scope = Some(PlayerFilter::All);
+    Some(def)
 }
 
 /// Parse "for each" quantity patterns on draw/life/damage/mill effects.
@@ -16080,6 +16162,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_balance_equalization(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_catch_up_draw(text, kind) {
+        return def;
+    }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
@@ -16104,6 +16189,9 @@ pub(crate) fn parse_effect_chain_with_context(
         return def;
     }
     if let Some(def) = try_parse_balance_equalization(text, kind) {
+        return def;
+    }
+    if let Some(def) = try_parse_catch_up_draw(text, kind) {
         return def;
     }
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
