@@ -5932,9 +5932,11 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::Not { .. } => ("Not", Handled),
         StaticCondition::DefendingPlayerControls { .. } => ("DefendingPlayerControls", Unhandled),
         StaticCondition::SourceAttackingAlone => ("SourceAttackingAlone", Unhandled),
-        StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Unhandled),
-        StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Unhandled),
-        StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Unhandled),
+        // CR 508.1k / 509.1g / 509.1h: runtime-evaluated against the live combat
+        // attacker/blocker sets (conditions.rs:81 / layers.rs:1118 / layers.rs:1123).
+        StaticCondition::SourceIsAttacking => ("SourceIsAttacking", Handled),
+        StaticCondition::SourceIsBlocking => ("SourceIsBlocking", Handled),
+        StaticCondition::SourceIsBlocked => ("SourceIsBlocked", Handled),
         StaticCondition::IsMonarch => ("IsMonarch", Handled),
         StaticCondition::IsInitiative => ("IsInitiative", Handled),
         StaticCondition::NoMonarch => ("NoMonarch", Handled),

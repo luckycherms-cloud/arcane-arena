@@ -18216,6 +18216,85 @@ fn aura_static_does_not_bind_it_pronoun_to_source() {
     }
 }
 
+#[test]
+fn self_static_resolves_it_pronoun_combat_state_to_source() {
+    // CR 508.1k / 509.1g / 509.1h: "it" in a self-referential combat-state gate
+    // refers to the source, so "as long as it's attacking/blocking/blocked" must
+    // type to the same Source* condition as the explicit "~ is …" form — not fall
+    // through to Unrecognized. Discriminating: before EDIT 1 these came back
+    // StaticCondition::Unrecognized { text: "it's attacking" }, which evals
+    // always-true (a permanent buff). Fails on revert.
+    let attacking = parse_static_line("This creature gets +1/+0 as long as it's attacking.") // Grasping Scoundrel
+        .expect("self static def");
+    assert_eq!(
+        attacking.condition,
+        Some(StaticCondition::SourceIsAttacking),
+        "expected SourceIsAttacking, got {:?}",
+        attacking.condition
+    );
+
+    let blocking = parse_static_line("This creature gets +1/+0 as long as it's blocking.")
+        .expect("self static def");
+    assert_eq!(
+        blocking.condition,
+        Some(StaticCondition::SourceIsBlocking),
+        "expected SourceIsBlocking, got {:?}",
+        blocking.condition
+    );
+
+    let blocked = parse_static_line("This creature gets +1/+0 as long as it's blocked.")
+        .expect("self static def");
+    assert_eq!(
+        blocked.condition,
+        Some(StaticCondition::SourceIsBlocked),
+        "expected SourceIsBlocked, got {:?}",
+        blocked.condition
+    );
+}
+
+#[test]
+fn aura_static_does_not_bind_it_pronoun_combat_state_to_source() {
+    // GUARD (anaphor trap): Tahngarth's Rage shape — the Aura's "it" refers to the
+    // ENCHANTED creature, not the Aura source, so it must NOT collapse to
+    // SourceIsAttacking. The ~745 SelfRef guard keeps it an honest Unrecognized gap.
+    let defs = parse_static_line_multi("Enchanted creature gets +3/+0 as long as it's attacking.");
+    assert!(!defs.is_empty(), "expected at least one static def");
+    for d in &defs {
+        assert_ne!(
+            d.condition,
+            Some(StaticCondition::SourceIsAttacking),
+            "Aura 'it' must not resolve to the source, got {:?}",
+            d.condition
+        );
+        assert_eq!(
+            d.condition,
+            Some(StaticCondition::Unrecognized {
+                text: "it's attacking".to_string(),
+            }),
+            "Aura combat-state gate must stay an honest Unrecognized gap, got {:?}",
+            d.condition
+        );
+    }
+}
+
+#[test]
+fn self_pronoun_combat_state_exact_match_excludes_attacking_alone() {
+    // NO-REGRESSION: the rewrite is exact-match. "it's attacking alone" must NOT
+    // hit the new arm (rest.trim() == "attacking alone" != the three literals);
+    // it stays routed to SourceAttackingAlone via its existing path. Exercised
+    // end-to-end via parse_static_line (rewrite_self_pronoun_subject is private to
+    // the anthem module), mirroring self_static_resolves_it_pronoun_subject_to_source.
+    let def = parse_static_line("This creature can't be blocked as long as it's attacking alone.")
+        .expect("self static def");
+    assert_eq!(def.condition, Some(StaticCondition::SourceAttackingAlone));
+
+    // And the bare "it's attacking" sibling DOES collapse to SourceIsAttacking,
+    // confirming the two literals route differently.
+    let buff = parse_static_line("This creature gets +1/+0 as long as it's attacking.")
+        .expect("self static def");
+    assert_eq!(buff.condition, Some(StaticCondition::SourceIsAttacking));
+}
+
 /// CR 702.16p: Benevolent Blessing — "Enchanted creature has protection from the
 /// chosen color. This effect doesn't remove Auras and Equipment you control that
 /// are already attached to it." The trailing inert SBA-exemption sentence must be
