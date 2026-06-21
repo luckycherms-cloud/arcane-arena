@@ -7984,6 +7984,12 @@ fn clause_is_additional_land_permission(clause: &ParsedEffectClause) -> bool {
     )
 }
 
+fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
+    crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
+        &source_text.to_ascii_lowercase(),
+    )
+}
+
 pub(crate) fn try_parse_exile_top_each_library_with_collection_counter(
     text: &str,
     kind: AbilityKind,
@@ -20039,6 +20045,7 @@ pub(crate) fn parse_effect_chain_ir(
         // permission grants as mandatory so resolution installs the permission.
         let is_optional = if matches!(&clause.effect, Effect::FreeCastFromZones { .. })
             || clause_is_additional_land_permission(&clause)
+            || clause_is_pay_to_end_effect_termination(normalized_text)
         {
             false
         } else {
@@ -38340,6 +38347,38 @@ mod tests {
                 "{label} must not be Unimplemented/CastFromZone, got {eff:?}"
             );
         }
+    }
+
+    /// Issue #4000: Dominating Licid's "you may pay {U} to end this effect" is a
+    /// separate termination permission, not an optional accept/decline on the
+    /// licid activation itself.
+    #[test]
+    fn dominating_licid_activation_is_not_optional() {
+        fn ability_tree_has_optional(def: &AbilityDefinition) -> bool {
+            if def.optional {
+                return true;
+            }
+            def.sub_ability
+                .as_ref()
+                .is_some_and(|sub| ability_tree_has_optional(sub))
+                || def
+                    .else_ability
+                    .as_ref()
+                    .is_some_and(|sub| ability_tree_has_optional(sub))
+        }
+
+        let def = parse_effect_chain(
+            "This creature loses this ability and becomes an Aura enchantment with enchant creature. Attach it to target creature. You may pay {U} to end this effect.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            !def.optional,
+            "licid activation root must not be optional, got {def:?}"
+        );
+        assert!(
+            !ability_tree_has_optional(&def),
+            "no sub_ability in the licid chain may carry optional=true"
+        );
     }
 
     #[test]

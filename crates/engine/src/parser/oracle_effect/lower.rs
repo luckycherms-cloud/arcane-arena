@@ -732,6 +732,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     ..
                 } if crate::game::casting_costs::cost_has_x(cost)
             );
+        let is_pay_to_end_effect_termination =
+            crate::parser::clause_shell::is_you_may_pay_to_end_effect_phrase(
+                &clause_ir.source_text.to_ascii_lowercase(),
+            );
         if clause_ir.is_optional
             && !matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. })
             && !matches!(
@@ -740,6 +744,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             )
             && !is_lingering_cast_from_zone
             && !is_join_forces_pay_any_amount_mana_cost
+            && !is_pay_to_end_effect_termination
         {
             def.optional = true;
             def.optional_for = clause_ir.opponent_may_scope;
@@ -752,6 +757,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
             )
             && !is_lingering_cast_from_zone
             && !is_join_forces_pay_any_amount_mana_cost
+            && !is_pay_to_end_effect_termination
         {
             def.optional = true;
         }
