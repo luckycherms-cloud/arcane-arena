@@ -2855,11 +2855,20 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 400.7 + CR 603.4: "if ~ entered this turn" intervening-if bridges to the
+        // trigger-side source-entered check (e.g. Hixus, Prison Warden — "Whenever a
+        // creature deals combat damage to you, if Hixus entered this turn, ..."). Both
+        // sides read GameObject.entered_battlefield_turn (game/conditions.rs
+        // eval_source_entered_this_turn) at trigger fire-time and at the resolution-time
+        // recheck, so the intervening-if is honored rather than silently dropped.
+        StaticCondition::SourceEnteredThisTurn => {
+            Some(TriggerCondition::SourceEnteredThisTurn)
+        }
+
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
-        StaticCondition::SourceEnteredThisTurn
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
-        | StaticCondition::SourceHasDealtDamage
+        StaticCondition::SourceHasDealtDamage
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::DevotionGE { .. }
@@ -27268,11 +27277,51 @@ mod tests {
 
     #[test]
     fn bridge_unmappable_variants_return_none() {
-        assert!(
-            static_condition_to_trigger_condition(&StaticCondition::SourceEnteredThisTurn)
-                .is_none()
-        );
         assert!(static_condition_to_trigger_condition(&StaticCondition::IsRingBearer).is_none());
+        assert!(
+            static_condition_to_trigger_condition(&StaticCondition::SourceHasDealtDamage).is_none()
+        );
+    }
+
+    #[test]
+    fn bridge_source_entered_this_turn() {
+        // CR 400.7 + CR 603.4: "if ~ entered this turn" intervening-if (Hixus, Prison
+        // Warden) bridges to the trigger-side source-entered check instead of being
+        // silently dropped.
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::SourceEnteredThisTurn),
+            Some(TriggerCondition::SourceEnteredThisTurn)
+        );
+    }
+
+    /// Hixus, Prison Warden: "Whenever a creature deals combat damage to you, if Hixus
+    /// entered this turn, exile that creature until Hixus leaves the battlefield." The
+    /// intervening-if "if Hixus entered this turn" must be retained as the trigger
+    /// condition. It was previously dropped to `None` (the static→trigger bridge had no
+    /// arm for `SourceEnteredThisTurn`), so the exile fired on every later turn rather
+    /// than only the turn Hixus flashed in (CR 400.7). The condition is evaluated at
+    /// trigger fire-time and rechecked at resolution (CR 603.4) against
+    /// `GameObject.entered_battlefield_turn`.
+    #[test]
+    fn parse_hixus_keeps_entered_this_turn_intervening_if() {
+        let defs = parse_trigger_lines(
+            "Whenever a creature deals combat damage to you, if Hixus entered this turn, \
+             exile that creature until Hixus leaves the battlefield.",
+            "Hixus, Prison Warden",
+        );
+        let def = defs
+            .iter()
+            .find(|d| d.condition == Some(TriggerCondition::SourceEnteredThisTurn))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a trigger with SourceEnteredThisTurn condition, got {:?}",
+                    defs.iter()
+                        .map(|d| (&d.mode, &d.condition))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.condition, Some(TriggerCondition::SourceEnteredThisTurn));
     }
 
     #[test]
