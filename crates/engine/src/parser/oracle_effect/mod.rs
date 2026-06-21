@@ -3921,6 +3921,8 @@ fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause
     let original_lower = text.to_lowercase();
     if scan_contains_phrase(&original_lower, "this turn")
         || scan_contains_phrase(&original_lower, "until ")
+        || scan_contains_phrase(&original_lower, "remain exiled")
+        || scan_contains_phrase(&original_lower, "remains exiled")
     {
         if let Some(mut clause) =
             try_parse_play_from_exile(TextPair::new(text, &original_lower), ctx)
@@ -7340,8 +7342,25 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
 
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
+    // CR 406.6 + CR 400.7i: "you may look at and play those cards for as long as
+    // they remain exiled" (Expensive Taste) grants the same impulse-style
+    // PlayFromExile permission; the "look at" conjunct is a private-information
+    // grant that the permission already implies (the controller can always see
+    // a card they may play). Folded in as a verb-prefix variant so the no-mana-
+    // conjunct form reaches the same grant as the bare "you may play those
+    // cards" path (the with-mana form is handled earlier by
+    // `try_parse_exile_play_grant_with_any_mana`).
     let full_rest = nom_on_lower(tp.original, tp.lower, |input| {
-        value((), alt((tag("you may play "), tag("you may cast ")))).parse(input)
+        value(
+            (),
+            alt((
+                tag("you may look at and play "),
+                tag("you may look at and cast "),
+                tag("you may play "),
+                tag("you may cast "),
+            )),
+        )
+        .parse(input)
     })
     .map(|((), rest_orig)| {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -7380,33 +7399,60 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             return None;
         }
     } else {
-        // Bare form (after "you may" was stripped by parse_effect_chain):
-        // Only match when temporal context exists ("this turn", "until"),
-        // otherwise it's a CastFromZone, not impulse draw permission.
-        let has_temporal =
-            scan_contains_phrase(tp.lower, "this turn") || scan_contains_phrase(tp.lower, "until ");
-        if !has_temporal {
-            return None;
-        }
+        // Bare form (after "you may" was stripped by parse_effect_chain).
         if scan_contains_phrase(tp.lower, "without paying") {
             return None;
         }
-        // CR 400.7i + CR 603.7: "(the) cards exiled this way" bare anaphor
-        // (Escape to the Wilds, after `you may ` is peeled by the chunk loop).
-        if alt((
-            tag::<_, _, OracleError<'_>>("play that card"),
-            tag("cast that card"),
-            tag("play it"),
-            tag("cast it"),
-            tag("play the cards exiled this way"),
-            tag("play cards exiled this way"),
-            tag("cast the cards exiled this way"),
-            tag("cast cards exiled this way"),
+        // CR 406.6 + CR 400.7i + CR 603.7: these exile anaphors are
+        // unambiguous impulse-set referents when paired with the "look at and
+        // play/cast" surface. Accept them without requiring an in-body temporal
+        // marker: the clause shell may have peeled the "for as long as ...
+        // remain[s] exiled" duration into the wrapper, so `tp.lower` no longer
+        // carries the duration text even though `with_clause_duration` will patch
+        // it onto the grant.
+        let look_at_play_anaphor_form = alt((
+            tag::<_, _, OracleError<'_>>("look at and play those cards"),
+            tag("look at and cast those cards"),
+            tag("look at and play that card"),
+            tag("look at and cast that card"),
+            tag("look at and play it"),
+            tag("look at and cast it"),
         ))
         .parse(tp.lower)
-        .is_err()
-        {
-            return None;
+        .is_ok();
+        let mass_anaphor_form = alt((
+            tag::<_, _, OracleError<'_>>("play those cards"),
+            tag("cast those cards"),
+        ))
+        .parse(tp.lower)
+        .is_ok();
+        if look_at_play_anaphor_form || mass_anaphor_form {
+            // fall through to the grant builder.
+        } else {
+            // Only match when temporal context exists ("this turn", "until"),
+            // otherwise it's a CastFromZone, not impulse draw permission.
+            let has_temporal = scan_contains_phrase(tp.lower, "this turn")
+                || scan_contains_phrase(tp.lower, "until ");
+            if !has_temporal {
+                return None;
+            }
+            // CR 400.7i + CR 603.7: "(the) cards exiled this way" bare anaphor
+            // (Escape to the Wilds, after `you may ` is peeled by the chunk loop).
+            if alt((
+                tag::<_, _, OracleError<'_>>("play that card"),
+                tag("cast that card"),
+                tag("play it"),
+                tag("cast it"),
+                tag("play the cards exiled this way"),
+                tag("play cards exiled this way"),
+                tag("cast the cards exiled this way"),
+                tag("cast cards exiled this way"),
+            ))
+            .parse(tp.lower)
+            .is_err()
+            {
+                return None;
+            }
         }
     }
 
@@ -7429,9 +7475,18 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         return None;
     }
 
-    // Duration: extract from trailing text, defaulting to UntilEndOfTurn for impulse draw
+    // Duration: extract from trailing text, defaulting to UntilEndOfTurn for impulse draw.
+    // CR 400.7i + CR 611.2a: "for as long as ... remain[s] exiled" persists until
+    // zone-exit cleanup clears the exile-scoped permission, matching the existing
+    // any-mana remains-exiled grant path.
     let (_, dur) = strip_trailing_duration(tp.original);
-    let duration = dur.unwrap_or(Duration::UntilEndOfTurn);
+    let duration = if scan_contains_phrase(tp.lower, "remain exiled")
+        || scan_contains_phrase(tp.lower, "remains exiled")
+    {
+        Duration::Permanent
+    } else {
+        dur.unwrap_or(Duration::UntilEndOfTurn)
+    };
 
     Some(parsed_clause(Effect::GrantCastingPermission {
         permission: CastingPermission::PlayFromExile {
@@ -20164,6 +20219,13 @@ fn try_parse_put_zone_change_parts(
         (" into their hand", Zone::Hand),
         (" into its owner's hand", Zone::Hand),
         (" into their owner's hand", Zone::Hand),
+        // CR 400.3 + CR 110.1: plural possessive — a mass move where each card
+        // goes to its OWN owner's hand/graveyard ("Put all cards exiled with ~
+        // into their owners' hands" — Connecting the Dots). `execute_zone_move`
+        // already keys the destination by each object's owner for non-
+        // battlefield zones, so the plural form needs no separate routing.
+        (" into their owners' hands", Zone::Hand),
+        (" into their owners' graveyards", Zone::Graveyard),
         (" into your graveyard", Zone::Graveyard),
         (" into its owner's graveyard", Zone::Graveyard),
         (" into their owner's graveyard", Zone::Graveyard),
@@ -37167,6 +37229,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_play_from_exile_while_exiled_with_spend_mana_as_any_color_permission() {
+        let def = parse_effect_chain(
+            "You may look at and play that card for as long as it remains exiled, and you may spend mana as though it were mana of any color to cast that spell.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected PlayFromExile grant with any-color mana permission, got {def:#?}"
+        );
+    }
+
+    #[test]
+    fn parse_brainstealer_dragon_play_grant_folds_mana_rider() {
+        let def = parse_effect_chain(
+            "Exile the top card of each opponent's library. You may play those cards for as long as they remain exiled. If you cast a spell this way, you may spend mana as though it were mana of any color to cast it.",
+            AbilityKind::Spell,
+        );
+        let grant = def
+            .sub_ability
+            .as_deref()
+            .expect("exile instruction must chain to play grant");
+        assert!(matches!(
+            &*grant.effect,
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                    ..
+                },
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ));
+        assert!(
+            grant.sub_ability.is_none(),
+            "mana rider must fold into the play grant instead of emitting a standalone sub-ability: {grant:#?}"
+        );
     }
 
     #[test]
