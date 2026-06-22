@@ -23998,6 +23998,44 @@ mod tests {
     }
 
     #[test]
+    fn phase_trigger_braids_sacrifices_artifact_creature_or_land() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player sacrifices an artifact, a creature, or a land.",
+            "Braids, Cabal Minion",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Sacrifice { target, .. }) => match target {
+                TargetFilter::Or { filters } => {
+                    assert_eq!(filters.len(), 3);
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters == [TypeFilter::Artifact]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Creature]
+                    )));
+                    assert!(filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf) if tf.type_filters == [TypeFilter::Land]
+                    )));
+                    assert!(filters.iter().all(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::ScopedPlayer)
+                    )));
+                }
+                other => panic!("expected Or sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
         let def = parse_trigger_line(
             "At the beginning of each player's upkeep, that player sacrifices a non-Elf creature of their choice.",

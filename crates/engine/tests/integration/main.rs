@@ -347,6 +347,7 @@ mod issue_689_resonating_lute_hand_size;
 mod issue_691_sheoldred_saga_lore;
 mod issue_709_regression;
 mod issue_841_selvala_explorer_returned;
+mod issue_847_braids_cabal_minion;
 mod issue_859_weathered_wayfarer;
 mod issue_860_luminarch_aspirant;
 mod issue_861_first_sliver_cascade;
