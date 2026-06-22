@@ -257,6 +257,27 @@ pub struct SpellMeta {
     /// MV/X spend restrictions (`OnlyForSpellMatchingCostCriteria`). `false` at
     /// payment sites with no associated spell, or when the spell has no `{X}`.
     pub has_x_in_cost: bool,
+    /// CR 708.4: Whether the spell is being CAST FACE DOWN (morph/disguise/cloak
+    /// cast as a 2/2 face-down creature). Consulted by the "cast face-down
+    /// spells" spend restriction ([`ManaRestriction::OnlyForFaceDownSpell`],
+    /// Tin Street Gossip). `false` at payment sites with no associated spell or
+    /// for a normal face-up cast.
+    ///
+    /// This is "being cast face down", NOT "the object is currently face down" —
+    /// the two differ for exile/library concealment. Foretell (CR 702.143a),
+    /// hideaway, and similar effects set `obj.face_down = true` while the card
+    /// waits in exile, yet that card is CAST FACE UP (CR 702.143c: a foretold card
+    /// is cast face up "even if it was cast for a cost other than a foretell
+    /// cost"). `game::casting::build_spell_meta` therefore sources this field from
+    /// the cast's face-down intent, hardcoded `false` today — never from raw
+    /// `obj.face_down` — so a foretold/hideaway cast is correctly reported as
+    /// face-up. No engine path casts a spell face down (CR 708.4 face-down play,
+    /// `PlayFaceDown` → `game::morph::play_face_down`, enters the battlefield via
+    /// the zone pipeline and charges no mana, building no spell-payment context),
+    /// so the field is fail-closed: never `true` at a real `PaymentContext::Spell`
+    /// site. It is wired for forward compatibility — see
+    /// [`ManaRestriction::OnlyForFaceDownSpell`] for the contract.
+    pub is_face_down: bool,
 }
 
 /// CR 106.6: Context for a mana-payment decision. Distinguishes "paying for a
@@ -302,16 +323,28 @@ pub enum PaymentContext<'a> {
 /// Only special actions that pay a mana cost *through the mana pool* with a
 /// restriction-aware payment context belong here. CR 116.2m / CR 709.5e door
 /// unlock is the first such action (its unlock cost routes through
-/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up does not yet pay its
-/// morph/disguise cost through a restriction-aware pool payment, so it is
-/// intentionally absent — its spend restriction is honest-deferred rather than
-/// silently over-permitted. New variants are added only once the corresponding
-/// special action's payment is routed through `PaymentContext::SpecialAction`.
+/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up's morph/disguise cost
+/// is not yet paid through a restriction-aware pool payment in this engine
+/// (`game::morph::turn_face_up` flips the permanent without charging the cost),
+/// so a `TurnFaceUp`-restricted mana's runtime gate
+/// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) can
+/// never be satisfied yet — it is honest-deferred (conservatively
+/// under-permitting) rather than silently over-permitting the mana. The variant
+/// exists so the restriction is representable (the cluster's cards parse to no
+/// `Effect::Unimplemented`); once the turn-face-up morph cost is routed through
+/// `PaymentContext::SpecialAction(TurnFaceUp)` the gate becomes live with no
+/// type change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
     /// the permanent the appropriate unlocked designation.
     UnlockDoor,
+    /// CR 116.2b + CR 702.37e: Paying a face-down permanent's morph/disguise
+    /// cost to turn it face up. No payment site emits
+    /// `PaymentContext::SpecialAction(TurnFaceUp)` yet (turn-face-up is free in
+    /// this engine), so a mana restricted to this action is conservatively
+    /// unspendable rather than over-permitted — see the type-level note above.
+    TurnFaceUp,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
@@ -497,6 +530,29 @@ pub enum ManaRestriction {
     /// accepts the legacy bare-`Zone` form (`{"OnlyForSpellFromZone":"Graveyard"}`)
     /// for backward compatibility, mapping it to the inclusion reading.
     OnlyForSpellFromZone(ZoneSpend),
+    /// CR 106.6 + CR 708.4: "Spend this mana only to cast face-down spells"
+    /// (Tin Street Gossip). Gates spending on whether the spell is being CAST
+    /// face down (morph/disguise/cloak), consulting `SpellMeta.is_face_down`.
+    /// Rejects normal face-up casts, ability activations, and special actions.
+    ///
+    /// The gate reads `meta.is_face_down`, which `build_spell_meta` sources from
+    /// the cast's face-down intent — NOT from `obj.face_down`. That distinction
+    /// matters: exile/library concealment (foretell, hideaway) sets
+    /// `obj.face_down = true` for a card that is nonetheless CAST FACE UP
+    /// (CR 702.143c), so the gate correctly REJECTS those concealment casts.
+    ///
+    /// The gate is also fail-closed today: no production path casts a face-down
+    /// spell *through spell payment* in this engine. CR 708.4 face-down play is
+    /// modeled by [`GameAction::PlayFaceDown`] → `game::morph::play_face_down`,
+    /// which moves the card hand→battlefield via the zone pipeline and charges no
+    /// mana (the `{3}` face-down cast cost, CR 702.37c, is not yet implemented).
+    /// So `SpellMeta.is_face_down` is never `true` at any `PaymentContext::Spell`
+    /// payment site, and this gate never over-permits — see
+    /// [`ManaRestriction::allows_spell`]. The restriction stays representable (the
+    /// cluster's cards parse to no `Effect::Unimplemented`); once a real face-down
+    /// CAST routes its cost through `PaymentContext::Spell` with `is_face_down =
+    /// true` the gate becomes live with no type change.
+    OnlyForFaceDownSpell,
     /// CR 106.6: Disjunctive spend restriction — the mana may be spent on any
     /// payment that satisfies at least one inner restriction. Composition
     /// combinator (each branch is itself a full restriction), not a leaf
@@ -643,6 +699,22 @@ impl ManaRestriction {
                     .cast_from_zone
                     .is_some_and(|cast_from| cast_from != zs.zone),
             },
+            // CR 708.4: Face-down-spell-gated spend. The eligibility predicate is
+            // `meta.is_face_down` — a spell qualifies only when it is being CAST
+            // face down (morph/disguise/cloak); normal face-up casts are
+            // ineligible. `is_face_down` is sourced from the cast's face-down
+            // intent (`build_spell_meta`), not from `obj.face_down`, so this arm
+            // correctly REJECTS both normal face-up casts AND exile-concealment
+            // casts (foretell/hideaway, CR 702.143c) whose `obj.face_down = true`
+            // but which are cast face up. It is also fail-closed: no production
+            // payment site casts a spell face down (`GameAction::PlayFaceDown` →
+            // `game::morph::play_face_down` enters the battlefield via the zone
+            // pipeline and charges no mana), so `is_face_down` is never `true` at a
+            // real `PaymentContext::Spell` site and the gate never over-permits. It
+            // already reads `meta.is_face_down`, so the day a real face-down CAST
+            // routes its `{3}` cost through `PaymentContext::Spell` with that flag
+            // set, the gate becomes live with no change here. See the variant doc.
+            ManaRestriction::OnlyForFaceDownSpell => meta.is_face_down,
             // CR 106.6: Disjunction — the spell is payable if it satisfies any branch.
             ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             // CR 116.2: Special-action-only mana never pays for a spell cast.
@@ -673,6 +745,8 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellMatchingCostCriteria { .. }
             | ManaRestriction::OnlyForSpellWithColorCount { .. }
             | ManaRestriction::OnlyForSpellFromZone(_)
+            // CR 708.4: Face-down-spell-only mana never pays for ability activation.
+            | ManaRestriction::OnlyForFaceDownSpell
             // CR 116.2: Special-action-only mana never pays for ability activation.
             | ManaRestriction::OnlyForSpecialAction(_) => false,
             // CR 106.6: The ability-activation half of the OR. `OfSpellType`
@@ -1721,6 +1795,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -1730,6 +1805,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let legendary_spell = SpellMeta {
             types: vec!["Legendary".to_string(), "Creature".to_string()],
@@ -1739,6 +1815,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&creature_spell));
         assert!(!restriction.allows_spell(&instant_spell));
@@ -1764,6 +1841,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let omen_spell = SpellMeta {
             types: vec!["Enchantment".to_string(), "Omen".to_string()],
@@ -1773,6 +1851,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1782,6 +1861,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         // Matches one branch each.
         assert!(restriction.allows_spell(&dragon_spell));
@@ -1829,6 +1909,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let turtle_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1838,6 +1919,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1847,6 +1929,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&ninja_creature));
         assert!(!restriction.allows_spell(&turtle_creature));
@@ -1864,6 +1947,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let source_types = vec!["Artifact".to_string()];
         let source_subtypes = Vec::new();
@@ -1888,6 +1972,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -1897,6 +1982,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let elf_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -1906,6 +1992,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&elf_creature));
         assert!(!restriction.allows_spell(&goblin_creature));
@@ -1928,6 +2015,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(!restriction.allows_spell(&elf_creature));
         let source_types = vec!["Creature".to_string()];
@@ -1954,6 +2042,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let spent = pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&spell))
@@ -1980,6 +2069,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&elf_spell))
@@ -2040,6 +2130,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(pool
             .spend_for(ManaType::Green, &PaymentContext::Spell(&goblin_spell))
@@ -2064,6 +2155,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let tribal_elemental_instant = SpellMeta {
             types: vec!["Tribal".to_string(), "Instant".to_string()],
@@ -2073,6 +2165,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let goblin_creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2082,6 +2175,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let plain_instant = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2091,6 +2185,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&elemental_creature));
         assert!(restriction.allows_spell(&tribal_elemental_instant));
@@ -2114,6 +2209,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let colored_eldrazi = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2123,6 +2219,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let colorless_construct = SpellMeta {
             types: vec!["Artifact".to_string(), "Colorless".to_string()],
@@ -2132,6 +2229,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&colorless_eldrazi));
         assert!(!restriction.allows_spell(&colored_eldrazi));
@@ -2185,6 +2283,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let colored_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2194,6 +2293,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         // Spell half: still gated to the named type.
         assert!(restriction.allows_spell(&colorless_spell));
@@ -2232,6 +2332,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let artifact_creature_spell = SpellMeta {
             types: vec!["Artifact".to_string(), "Creature".to_string()],
@@ -2241,6 +2342,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let instant_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2250,6 +2352,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2259,6 +2362,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         // Permitted: any artifact spell (incl. artifact creatures).
         assert!(restriction.allows(&PaymentContext::Spell(&artifact_spell)));
@@ -2294,6 +2398,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let creature_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2303,6 +2408,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let artifact_types = vec!["Artifact".to_string()];
         let creature_types = vec!["Creature".to_string()];
@@ -2321,6 +2427,92 @@ mod tests {
             ability_tag: None,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
+    }
+
+    // CR 708.4: "Spend this mana only to cast face-down spells" (Tin Street
+    // Gossip). The restriction permits a face-down cast and rejects a normal
+    // face-up cast, ability activation, generic effects, and special actions.
+    #[test]
+    fn restriction_face_down_spell_only_allows_face_down_cast() {
+        let restriction = ManaRestriction::OnlyForFaceDownSpell;
+        let face_down_spell = SpellMeta {
+            // CR 708.2a: a face-down spell is a typeless 2/2; what matters here
+            // is the is_face_down flag, not the (cleared) type list.
+            types: vec!["Creature".to_string()],
+            is_face_down: true,
+            ..SpellMeta::default()
+        };
+        let face_up_spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            is_face_down: false,
+            ..SpellMeta::default()
+        };
+        // LEGAL: spending the mana on a face-down cast.
+        assert!(restriction.allows(&PaymentContext::Spell(&face_down_spell)));
+        // ILLEGAL: a normal face-up cast.
+        assert!(!restriction.allows(&PaymentContext::Spell(&face_up_spell)));
+        // ILLEGAL: ability activation, generic effect, and special actions.
+        assert!(!restriction.allows(&PaymentContext::Activation {
+            source_types: &["Creature".to_string()],
+            source_subtypes: &[],
+            ability_tag: None,
+        }));
+        assert!(!restriction.allows(&PaymentContext::Effect));
+        assert!(!restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
+        assert!(!restriction.allows(&PaymentContext::SpecialAction(SpecialAction::TurnFaceUp)));
+    }
+
+    // CR 116.2b + CR 702.37e: "turn permanents face up" lowers to a
+    // TurnFaceUp special-action restriction. It accepts only the matching
+    // special action and rejects every spell cast / activation / effect.
+    #[test]
+    fn restriction_turn_face_up_special_action_gate() {
+        let restriction = ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp);
+        // Accepts the matching special action.
+        assert!(restriction.allows(&PaymentContext::SpecialAction(SpecialAction::TurnFaceUp)));
+        // Rejects the unrelated door-unlock special action.
+        assert!(!restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
+        // Rejects spell casts (face-down or not), activations, and effects.
+        let spell = SpellMeta {
+            types: vec!["Creature".to_string()],
+            is_face_down: true,
+            ..SpellMeta::default()
+        };
+        assert!(!restriction.allows(&PaymentContext::Spell(&spell)));
+        assert!(!restriction.allows(&PaymentContext::Activation {
+            source_types: &["Creature".to_string()],
+            source_subtypes: &[],
+            ability_tag: None,
+        }));
+        assert!(!restriction.allows(&PaymentContext::Effect));
+    }
+
+    // CR 106.6: Creeping Peeper's three-way disjunction
+    // `Any([SpellType("Enchantment"), OnlyForSpecialAction(UnlockDoor),
+    // OnlyForSpecialAction(TurnFaceUp)])` accepts an enchantment cast and the
+    // door-unlock special action, and rejects a non-enchantment cast — the
+    // disjunction routes each payment context to the correct branch.
+    #[test]
+    fn restriction_creeping_peeper_disjunction_routes_each_context() {
+        let restriction = ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForSpellType("Enchantment".to_string()),
+            ManaRestriction::OnlyForSpecialAction(SpecialAction::UnlockDoor),
+            ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp),
+        ]);
+        let enchantment = SpellMeta {
+            types: vec!["Enchantment".to_string()],
+            ..SpellMeta::default()
+        };
+        let creature = SpellMeta {
+            types: vec!["Creature".to_string()],
+            ..SpellMeta::default()
+        };
+        // LEGAL: enchantment cast (first branch).
+        assert!(restriction.allows(&PaymentContext::Spell(&enchantment)));
+        // LEGAL: door-unlock special action (second branch).
+        assert!(restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
+        // ILLEGAL: a non-enchantment (creature) cast satisfies no branch.
+        assert!(!restriction.allows(&PaymentContext::Spell(&creature)));
     }
 
     // CR 106.6 + CR 601.2g: "Spend this mana only to cast instant and sorcery
@@ -2344,6 +2536,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let sorcery = SpellMeta {
             types: vec!["Sorcery".to_string()],
@@ -2353,6 +2546,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let creature = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -2362,6 +2556,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         // Manamorphose is an instant — the {R}{R} restricted mana must pay for it.
         assert!(restriction.allows_spell(&instant));
@@ -2403,6 +2598,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         let normal_spell = SpellMeta {
             types: vec!["Instant".to_string()],
@@ -2412,6 +2608,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&flashback_spell));
         assert!(!restriction.allows_spell(&normal_spell));
@@ -2429,12 +2626,14 @@ mod tests {
             mana_value: Some(6),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let no_mv = SpellMeta::default();
@@ -2456,12 +2655,14 @@ mod tests {
             mana_value: Some(2),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&mv_two));
@@ -2484,6 +2685,7 @@ mod tests {
             mana_value: Some(4),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2495,6 +2697,7 @@ mod tests {
             mana_value: Some(5),
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2528,11 +2731,13 @@ mod tests {
         let three_colors = SpellMeta {
             color_count: Some(3),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let two_colors = SpellMeta {
             color_count: Some(2),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&three_colors));
@@ -2555,11 +2760,13 @@ mod tests {
         let colorless = SpellMeta {
             color_count: Some(0),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
             color_count: Some(1),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(restriction.allows_spell(&colorless));
@@ -2581,11 +2788,13 @@ mod tests {
         let three_colors = SpellMeta {
             color_count: Some(3),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         let one_color = SpellMeta {
             color_count: Some(1),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(two_or_more.allows_spell(&three_colors));
@@ -2609,6 +2818,7 @@ mod tests {
         let one_color = SpellMeta {
             color_count: Some(1),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2619,6 +2829,7 @@ mod tests {
         let two_colors = SpellMeta {
             color_count: Some(2),
             has_x_in_cost: false,
+            is_face_down: false,
             ..SpellMeta::default()
         };
         assert!(pool
@@ -2884,6 +3095,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(restriction.allows_spell(&equipment_spell));
         // Non-Equipment artifact spell: REJECTED.
@@ -2895,6 +3107,7 @@ mod tests {
             mana_value: None,
             color_count: None,
             has_x_in_cost: false,
+            is_face_down: false,
         };
         assert!(!restriction.allows_spell(&artifact_spell));
     }
