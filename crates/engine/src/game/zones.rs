@@ -726,7 +726,9 @@ pub fn move_to_zone(
         super::trigger_index::reindex_object_triggers(state, object_id);
     }
 
-    super::restrictions::record_zone_change(state, zone_change_record.clone());
+    let turn_zone_change_index =
+        super::restrictions::record_zone_change(state, zone_change_record.clone());
+    zone_change_record.turn_zone_change_index = turn_zone_change_index;
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {
@@ -990,7 +992,9 @@ pub fn move_to_library_at_index(
         obj_mut.zone = Zone::Library;
     }
 
-    super::restrictions::record_zone_change(state, zone_change_record.clone());
+    let turn_zone_change_index =
+        super::restrictions::record_zone_change(state, zone_change_record.clone());
+    zone_change_record.turn_zone_change_index = turn_zone_change_index;
 
     if let Some(old_target) = unattached_from {
         events.push(GameEvent::Unattached {

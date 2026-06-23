@@ -1118,6 +1118,7 @@ impl GameObject {
             is_token: self.is_token,
             combat_status: Default::default(),
             co_departed: Vec::new(),
+            turn_zone_change_index: 0,
         }
     }
 

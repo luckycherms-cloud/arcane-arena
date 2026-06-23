@@ -417,6 +417,85 @@ fn partition_lki_trigger_definitions(
     (printed, granted_keywords)
 }
 
+fn batched_zone_change_batch(events: &[GameEvent]) -> bool {
+    !events.is_empty()
+        && events
+            .iter()
+            .all(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+}
+
+// CR 603.2c: An ability triggers only once each time its trigger event occurs.
+// This helper checks if the replay guard applies to a batched zone-change trigger.
+fn batched_zone_change_replay_guard_applies(
+    trig_def: &TriggerDefinition,
+    trigger_events: &[GameEvent],
+) -> bool {
+    trig_def.batched
+        && matches!(
+            trig_def.mode,
+            TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll | TriggerMode::Evolve
+        )
+        && batched_zone_change_batch(trigger_events)
+}
+
+fn batched_zone_change_already_collected(
+    state: &GameState,
+    source_id: ObjectId,
+    trig_idx: usize,
+    trigger_events: &[GameEvent],
+) -> bool {
+    let mut zone_changes = trigger_events
+        .iter()
+        .filter_map(|event| {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                Some(record.turn_zone_change_index)
+            } else {
+                None
+            }
+        })
+        .peekable();
+    zone_changes.peek().is_some()
+        && zone_changes.all(|turn_zone_change_index| {
+            state.batched_zone_change_trigger_fired.contains(&(
+                source_id,
+                trig_idx,
+                turn_zone_change_index,
+            ))
+        })
+}
+
+fn record_batched_zone_change_collected(
+    state: &mut GameState,
+    source_id: ObjectId,
+    trig_idx: usize,
+    trigger_events: &[GameEvent],
+) {
+    for event in trigger_events {
+        if let GameEvent::ZoneChanged { record, .. } = event {
+            state.batched_zone_change_trigger_fired.insert((
+                source_id,
+                trig_idx,
+                record.turn_zone_change_index,
+            ));
+        }
+    }
+}
+
+fn record_matched_batched_zone_change_replay(
+    state: &mut GameState,
+    source_id: ObjectId,
+    matched: &MatchedTrigger,
+) {
+    if matched.batched && batched_zone_change_batch(&matched.trigger_events) {
+        record_batched_zone_change_collected(
+            state,
+            source_id,
+            matched.trig_idx,
+            &matched.trigger_events,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
@@ -690,6 +769,16 @@ fn collect_matching_triggers_inner(
                 vec![vec![event.clone()]]
             };
             for trigger_events in trigger_event_batches {
+                if batched_zone_change_replay_guard_applies(trig_def, &trigger_events)
+                    && batched_zone_change_already_collected(
+                        state,
+                        obj_id,
+                        trig_idx,
+                        &trigger_events,
+                    )
+                {
+                    continue;
+                }
                 let trigger_event = trigger_events
                     .first()
                     .cloned()
@@ -1301,6 +1390,7 @@ fn collect_pending_triggers(
                     matched.trig_idx,
                     event,
                 );
+                record_matched_batched_zone_change_replay(state, obj_id, &matched);
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -1701,6 +1791,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, *moved_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
@@ -1750,6 +1841,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, *exploiter, &matched);
                     if matched.batched {
                         batched_this_pass.insert((*exploiter, matched.trig_idx));
                     }
@@ -1819,6 +1911,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, observer_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
                     }
@@ -1935,6 +2028,7 @@ fn collect_pending_triggers(
                         matched.trig_idx,
                         event,
                     );
+                    record_matched_batched_zone_change_replay(state, obj_id, &matched);
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
