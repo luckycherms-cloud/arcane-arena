@@ -1299,6 +1299,77 @@ fn freeze_reflexive_event_count(
     u32::try_from(count).ok().filter(|&c| c > 0)
 }
 
+/// CR 608.2c: A conditional clause's `else_ability` target slots are not
+/// collected when the trigger or spell ability is put on the stack — only the
+/// gated head's targets are announced (CR 603.3d). When the `if` branch fails
+/// and the else branch runs, bind its targets at resolution: auto-bind when
+/// exactly one legal combination exists (CR 115.4), or prompt via
+/// `ChooseFromZoneChoice` when multiple object targets are legal (Bolster class).
+///
+/// Returns `true` when resolution paused on a player choice.
+fn try_begin_deferred_else_branch_target_selection(
+    state: &mut GameState,
+    else_resolved: &mut ResolvedAbility,
+    _events: &mut Vec<GameEvent>,
+) -> Result<bool, EffectError> {
+    if !else_resolved.targets.is_empty() {
+        return Ok(false);
+    }
+    let slots = crate::game::ability_utils::build_target_slots(state, else_resolved)
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+    if slots.is_empty() {
+        return Ok(false);
+    }
+    let constraints = &else_resolved.target_constraints;
+    if let Some(selected) = crate::game::ability_utils::auto_select_targets_for_ability(
+        state,
+        else_resolved,
+        &slots,
+        constraints,
+    )
+    .map_err(|e| EffectError::InvalidParam(e.to_string()))?
+    {
+        crate::game::ability_utils::assign_targets_in_chain(state, else_resolved, &selected)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+        return Ok(false);
+    }
+    if !crate::game::ability_utils::has_legal_target_assignment_for_ability(
+        state,
+        else_resolved,
+        &slots,
+        constraints,
+    ) {
+        return Ok(false);
+    }
+    // CR 608.2d: ambiguous single-object-target else branches (Wick: "put a +1/+1
+    // counter on a Snail you control" with two Snails) prompt the controller to
+    // choose, mirroring the Bolster keyword-action tie-break path.
+    if slots.len() == 1 {
+        let candidates: Vec<crate::types::identifiers::ObjectId> = slots[0]
+            .legal_targets
+            .iter()
+            .filter_map(|t| match t {
+                crate::types::ability::TargetRef::Object(id) => Some(*id),
+                crate::types::ability::TargetRef::Player(_) => None,
+            })
+            .collect();
+        if !candidates.is_empty() {
+            state.pending_continuation =
+                Some(PendingContinuation::new(Box::new(else_resolved.clone())));
+            state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                player: else_resolved.controller,
+                cards: candidates,
+                count: 1,
+                up_to: false,
+                constraint: None,
+                source_id: else_resolved.source_id,
+            };
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// CR 603.12: Begin reflexive target selection for a `WhenYouDo` /
 /// `QuantityCheck` ability whose targets were deferred to resolution time.
 /// Returns `true` when `WaitingFor::TriggerTargetSelection` (or inline random
@@ -5159,6 +5230,13 @@ fn resolve_chain_body(
                     else_resolved.targets = ability.targets.clone();
                 }
                 else_resolved.context = ability.context.clone();
+                if try_begin_deferred_else_branch_target_selection(
+                    state,
+                    &mut else_resolved,
+                    events,
+                )? {
+                    return Ok(());
+                }
                 resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
             } else if let Some(ref sub) = ability.sub_ability {
                 // CR 608.2c: A skipped `IfYouDo` head whose effect
@@ -6152,6 +6230,13 @@ fn resolve_chain_body(
                         ability,
                         effect_context_object.as_ref(),
                     );
+                    if try_begin_deferred_else_branch_target_selection(
+                        state,
+                        &mut else_resolved,
+                        events,
+                    )? {
+                        return Ok(());
+                    }
                     resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
                 } else if let Some(ref next) = sub.sub_ability {
                     // CR 608.2c: A separate-sentence sibling after the gated sub is

@@ -16605,6 +16605,41 @@ mod tests {
         }
     }
 
+    /// CR 603.4 + CR 608.2c: Wick — post-effect "if you don't control a Snail"
+    /// on the Token clause must re-home to `execute.condition`, not hoist to
+    /// `def.condition`, so the trigger still fires when a Snail is present and
+    /// the Otherwise PutCounter runs via `else_ability`.
+    #[test]
+    fn wick_etb_post_effect_if_stays_on_execute_with_otherwise() {
+        use crate::types::ability::{AbilityCondition, Effect};
+
+        const WICK: &str = "Whenever Wick or another Rat you control enters, create a 1/1 black Snail creature token if you don't control a Snail. Otherwise, put a +1/+1 counter on a Snail you control.";
+        let def = parse_trigger_line(WICK, "Wick, the Whorled Mind");
+        assert!(
+            def.condition.is_none(),
+            "post-effect Snail gate must not hoist to trigger condition, got {:?}",
+            def.condition
+        );
+        let execute = def.execute.as_ref().expect("Wick ETB must have execute");
+        assert!(
+            matches!(
+                execute.condition,
+                Some(AbilityCondition::QuantityCheck { .. })
+            ),
+            "Token clause must carry the Snail control gate on execute.condition, got {:?}",
+            execute.condition
+        );
+        let else_branch = execute
+            .else_ability
+            .as_ref()
+            .expect("Otherwise must attach PutCounter as else_ability");
+        assert!(
+            matches!(*else_branch.effect, Effect::PutCounter { .. }),
+            "else branch must PutCounter, got {:?}",
+            else_branch.effect
+        );
+    }
+
     /// CR 603.4: A post-effect `if` ("draw a card if Y") is NOT an
     /// intervening-`if` — that rule applies only to an `if` that immediately
     /// follows the trigger condition ("When X, if Y, Z"). Such a trailing `if`
