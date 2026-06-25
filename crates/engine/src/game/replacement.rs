@@ -3764,6 +3764,8 @@ fn evaluate_replacement_condition(
                 // CR 603.2 + CR 109.4: Triggering-player scope is undefined at
                 // replacement-check time (no event context). Fail closed.
                 Some(ControllerRef::TriggeringPlayer) => false,
+                // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
+                Some(ControllerRef::EnchantedPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -3800,6 +3802,8 @@ fn evaluate_replacement_condition(
                 // CR 603.2 + CR 109.4: Triggering-player scope is undefined at
                 // replacement-check time (no event context). Fail closed.
                 Some(ControllerRef::TriggeringPlayer) => false,
+                // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
+                Some(ControllerRef::EnchantedPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -3958,7 +3962,9 @@ fn evaluate_replacement_condition(
                 | ControllerRef::DefendingPlayer
                 | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
-                | ControllerRef::TriggeringPlayer => false,
+                | ControllerRef::TriggeringPlayer
+                // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
+                | ControllerRef::EnchantedPlayer => false,
             }
         }
         ReplacementCondition::EffectCausedDiscard => matches!(
@@ -4465,6 +4471,8 @@ pub fn find_applicable_replacements(
                                 // has no meaning for static token-creation
                                 // replacements. Fail closed.
                                 crate::types::ability::ControllerRef::TriggeringPlayer => false,
+                                // CR 303.4b: Enchanted-player scope is undefined at replacement-check time. Fail closed.
+                                crate::types::ability::ControllerRef::EnchantedPlayer => false,
                             };
                             if !matches {
                                 continue;

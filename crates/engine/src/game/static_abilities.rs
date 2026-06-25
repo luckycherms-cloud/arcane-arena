@@ -1479,6 +1479,8 @@ pub(crate) fn static_filter_matches(
                         // CR 603.2 + CR 109.4: Triggering-player scope has no
                         // static context. Fail closed.
                         crate::types::ability::ControllerRef::TriggeringPlayer => false,
+                        // CR 303.4b: Enchanted-player scope has no static context. Fail closed.
+                        crate::types::ability::ControllerRef::EnchantedPlayer => false,
                     };
                 }
                 return true;

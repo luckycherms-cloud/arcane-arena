@@ -183,6 +183,8 @@ fn find_legal_targets_with_context(
                     // CR 603.2 + CR 109.4: The triggering player is fixed by
                     // the event, not enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::TriggeringPlayer) => false,
+                    // CR 303.4b: Enchanted-player scope is not enumerated as a target candidate. Fail closed.
+                    Some(ControllerRef::EnchantedPlayer) => false,
                     None => true,
                 };
                 if include {

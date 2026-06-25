@@ -1118,6 +1118,7 @@ impl GameObject {
             is_token: self.is_token,
             combat_status: Default::default(),
             co_departed: Vec::new(),
+            attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
             entered_incarnation: None,

@@ -2495,6 +2495,13 @@ pub enum ControllerRef {
     /// Used by control-relative trigger restrictions
     /// ("an opponent who controls F draws a card").
     TriggeringPlayer,
+    /// CR 303.4b + CR 702.5a: Filter controller is the player the source Aura
+    /// is attached to ("enchanted player controls"). Resolved at runtime by
+    /// reading `source.attached_to` and extracting the `PlayerId` via
+    /// `AttachTarget::as_player`. Powers the Curse cycle (Trespasser's Curse,
+    /// Curse of Clinging Webs, Curse of the Restless Dead) where the trigger
+    /// watches objects controlled by the enchanted player.
+    EnchantedPlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.

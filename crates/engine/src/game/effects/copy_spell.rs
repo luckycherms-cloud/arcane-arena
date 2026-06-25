@@ -396,7 +396,9 @@ fn resolve_copier_player(
         | ControllerRef::DefendingPlayer
         | ControllerRef::ChosenPlayer { .. }
         | ControllerRef::SourceChosenPlayer
-        | ControllerRef::TriggeringPlayer => None,
+        | ControllerRef::TriggeringPlayer
+        // CR 303.4b: Enchanted-player scope cannot resolve a copier. Fail closed.
+        | ControllerRef::EnchantedPlayer => None,
     }
 }
 

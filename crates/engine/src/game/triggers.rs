@@ -1887,8 +1887,36 @@ fn collect_pending_triggers(
                 {
                     continue;
                 }
+                // CR 303.4b + CR 603.10a: Restore the observer's LKI
+                // `attached_to` so `ControllerRef::EnchantedPlayer` resolves
+                // correctly for co-departed Curse Auras whose live
+                // `attached_to` was cleared by
+                // `sever_battlefield_attachment_graph_on_exit`.
+                let lki_attached_to = events.iter().find_map(|ev| {
+                    if let GameEvent::ZoneChanged {
+                        object_id: oid,
+                        record: rec,
+                        ..
+                    } = ev
+                    {
+                        if *oid == observer_id {
+                            return rec.attached_to;
+                        }
+                    }
+                    None
+                });
+                let saved_attached_to = state.objects.get(&observer_id).and_then(|o| o.attached_to);
+                if lki_attached_to.is_some() {
+                    if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
+                        obs_obj.attached_to = lki_attached_to;
+                    }
+                }
                 let matched_triggers = {
                     let Some(obj) = state.objects.get(&observer_id) else {
+                        // Restore before continuing.
+                        if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
+                            obs_obj.attached_to = saved_attached_to;
+                        }
                         continue;
                     };
                     collect_matching_triggers(
@@ -1903,6 +1931,13 @@ fn collect_pending_triggers(
                         &active_suppress_triggers,
                     )
                 };
+                // Restore the live object's `attached_to` to avoid leaking
+                // LKI state into subsequent trigger passes.
+                if lki_attached_to.is_some() {
+                    if let Some(obs_obj) = state.objects.get_mut(&observer_id) {
+                        obs_obj.attached_to = saved_attached_to;
+                    }
+                }
                 for matched in matched_triggers {
                     record_trigger_fired(
                         state,

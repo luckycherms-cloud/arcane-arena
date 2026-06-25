@@ -453,6 +453,15 @@ pub struct ZoneChangeRecord {
     /// post-entry bump (filled in by `move_to_zone`).
     #[serde(default)]
     pub entered_incarnation: Option<u64>,
+    /// CR 303.4b + CR 603.10a: The attachment target (player or object) as it
+    /// existed immediately before the zone change. For Aura Curses attached to a
+    /// player, this preserves the enchanted-player identity after
+    /// `sever_battlefield_attachment_graph_on_exit` clears the live field. Used by
+    /// the co-departed observer path so `ControllerRef::EnchantedPlayer` can
+    /// resolve via LKI when the Curse leaves in the same simultaneous event as
+    /// the watched creature.
+    #[serde(default)]
+    pub attached_to: Option<AttachTarget>,
     /// Per-turn monotonic index assigned when the zone change is recorded (CR
     /// 400.7). Distinguishes repeated identical `(object, from, to)` transitions
     /// within the same turn for batched trigger replay guards (issue #3866).
@@ -557,6 +566,7 @@ impl ZoneChangeRecord {
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
             co_departed: Vec::new(),
+            attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
         }

@@ -97,6 +97,17 @@ fn resolve_sacrifice_scope(
             .and_then(|event| crate::game::targeting::extract_player_from_event(event, state))
             .map(|pid| vec![pid])
             .unwrap_or_default(),
+        // CR 303.4b: The player an Aura is attached to.
+        Some(ControllerRef::EnchantedPlayer) => crate::game::filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            // CR 303.4b: Resolve enchanted player as sacrifice scope.
+            &ControllerRef::EnchantedPlayer,
+        )
+        .map(|pid| vec![pid])
+        .unwrap_or_default(),
     }
 }
 

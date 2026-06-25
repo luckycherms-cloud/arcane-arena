@@ -727,6 +727,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
+                    // CR 303.4b: Display label for enchanted-player controller scope.
+                    ControllerRef::EnchantedPlayer => "enchanted player's",
                 };
                 let zone_str = format!("{zone:?}").to_lowercase();
                 parts.push(format!(
@@ -860,6 +862,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
+                // CR 303.4b: Display label for enchanted-player controller scope.
+                ControllerRef::EnchantedPlayer => "enchanted player",
             };
             parts.push(label.into());
         } else {
@@ -930,6 +934,8 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
+        // CR 303.4b: Display label for enchanted-player controller scope.
+        ControllerRef::EnchantedPlayer => "enchanted player controls",
     }
     .into()
 }

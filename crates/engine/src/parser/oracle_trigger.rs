@@ -34760,3 +34760,75 @@ mod controlled_chosen_type_enters_tests {
         assert!(result.is_none(), "should reject trailing garbage");
     }
 }
+
+#[cfg(test)]
+mod enchanted_player_controls_tests {
+    use super::*;
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
+    use crate::types::triggers::TriggerMode;
+    use crate::types::zones::Zone;
+
+    /// CR 303.4b + CR 603.6a: "Whenever a creature enchanted player controls
+    /// enters" — Trespasser's Curse. The subject is a creature filtered by
+    /// `ControllerRef::EnchantedPlayer`, destination is Battlefield.
+    #[test]
+    fn trigger_creature_enchanted_player_controls_enters() {
+        let def = parse_trigger_line(
+            "Whenever a creature enchanted player controls enters, that player loses 1 life and you gain 1 life.",
+            "Trespasser's Curse",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::EnchantedPlayer)
+            ))
+        );
+    }
+
+    /// CR 303.4b + CR 603.6a: "Whenever a nontoken creature enchanted player
+    /// controls dies" — Curse of Clinging Webs. The subject is a nontoken
+    /// creature filtered by `ControllerRef::EnchantedPlayer`, destination is
+    /// Graveyard.
+    #[test]
+    fn trigger_nontoken_creature_enchanted_player_controls_dies() {
+        let def = parse_trigger_line(
+            "Whenever a nontoken creature enchanted player controls dies, exile it and you create a 1/2 green Spider creature token with reach.",
+            "Curse of Clinging Webs",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::EnchantedPlayer));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::NonToken)));
+            }
+            other => panic!("expected Typed filter, got {:?}", other),
+        }
+    }
+
+    /// CR 303.4b + CR 603.6a: "Whenever a land enchanted player controls
+    /// enters" — Curse of the Restless Dead. The subject is a land filtered by
+    /// `ControllerRef::EnchantedPlayer`, destination is Battlefield.
+    #[test]
+    fn trigger_land_enchanted_player_controls_enters() {
+        let def = parse_trigger_line(
+            "Whenever a land enchanted player controls enters, you create a 2/2 black Zombie creature token with decayed.",
+            "Curse of the Restless Dead",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::land().controller(ControllerRef::EnchantedPlayer)
+            ))
+        );
+    }
+}

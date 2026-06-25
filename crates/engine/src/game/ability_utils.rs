@@ -2636,6 +2636,15 @@ pub(crate) fn collect_player_targets(
                         .and_then(|e| targeting::extract_player_from_event(e, state))
                         == Some(p.id)
                 }
+                // CR 303.4b: The player the source Aura is attached to.
+                Some(ControllerRef::EnchantedPlayer) => {
+                    state
+                        .objects
+                        .get(&ability.source_id)
+                        .and_then(|source| source.attached_to)
+                        .and_then(|host| host.as_player())
+                        == Some(p.id)
+                }
                 None => true,
             })
             .map(|p| p.id)
