@@ -671,6 +671,8 @@ pub enum PreventionAmount {
     Next(u32),
     /// "Prevent all damage"
     All,
+    /// "Prevent all but N of that damage" (Temple Altisaur)
+    AllBut(u32),
 }
 
 /// CR 614.9: Recipient of a one-shot damage-redirection effect — the

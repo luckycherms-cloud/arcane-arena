@@ -358,6 +358,7 @@ mod issue_3999_latchkey_faerie_prowl_etb;
 mod issue_4000_dominating_licid;
 mod issue_4001_frolicking_familiar_adventure_instant;
 mod issue_4050_adamaro_extremum_hand_size;
+mod issue_4244_temple_altisaur;
 mod issue_4245_intruder_alarm_untap;
 mod issue_4249_elspeth_divine_visitation;
 mod issue_4271_birthing_ritual_cmc_filter;
