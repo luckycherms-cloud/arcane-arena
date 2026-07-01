@@ -433,6 +433,27 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 608.2g + CR 609.4b: paid graveyard cast (Quistis Trepe, Tinybones)
+        // offers a binary cast/decline; emit both for the search to explore.
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::GraveyardPaidCast { .. },
+        } => vec![
+            candidate(
+                GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Cast,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Decline,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
         // both accept (put onto the battlefield) and decline (hand / rest pile)
         // are legitimate plays, so emit both for the search to explore.
@@ -2589,6 +2610,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::CastOffer {
             kind: CastOfferKind::Discover { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::GraveyardPaidCast { .. },
             ..
         }
         | WaitingFor::CastOffer {
@@ -5405,6 +5430,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            enters_modified_if: None,
         };
 
         let actions = candidate_actions_broad(&state);
@@ -6487,6 +6513,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
         )
         .cost(AbilityCost::Mana {

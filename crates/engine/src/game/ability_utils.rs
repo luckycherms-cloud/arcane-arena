@@ -5968,12 +5968,12 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityKind, AggregateFunction, BounceSelection, CardTypeSetSource,
         CastManaObjectScope, CastManaSpentMetric, Comparator, ContinuousModification,
-        ControllerRef, CountScope, CounterTransferMode, DamageKindFilter, Duration, Effect,
-        FilterProp, GameRestriction, LibraryPosition, ModalChoice, ModalSelectionConstraint,
-        MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticDefinition,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
+        ControllerRef, CountScope, CounterTransferMode, DamageChannel, DamageKindFilter, Duration,
+        Effect, FilterProp, GameRestriction, LibraryPosition, ModalChoice,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ObjectScope, ProhibitedActivity,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
@@ -6403,6 +6403,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![TargetRef::Object(victim)],
             ObjectId(99),
@@ -7123,6 +7124,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             source,
@@ -7406,6 +7408,7 @@ mod tests {
                     enter_with_counters: vec![],
                     conditional_enter_with_counters: vec![],
                     face_down_profile: None,
+                    enters_modified_if: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -7467,6 +7470,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(2),
@@ -8142,6 +8146,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8180,6 +8185,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8212,6 +8218,7 @@ mod tests {
                 constraint: None,
                 duration: None,
                 driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -8277,6 +8284,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -8446,6 +8454,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9350,6 +9359,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(10),
@@ -9516,6 +9526,7 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
+                enters_modified_if: None,
             },
             vec![],
             ObjectId(900),
@@ -9732,7 +9743,7 @@ mod tests {
                 group_by: None,
                 damage_kind: DamageKindFilter::Any,
 
-                excess_only: false,
+                channel: DamageChannel::Total,
             },
         };
         assert!(quantity_expr_references_target_creature(&damage));
@@ -9833,7 +9844,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         let spec = quantity_ref_target_slot_spec(&targeted_damage)
             .expect("targeted DamageDealtThisTurn must surface a slot");
@@ -9857,7 +9868,7 @@ mod tests {
             group_by: None,
             damage_kind: DamageKindFilter::Any,
 
-            excess_only: false,
+            channel: DamageChannel::Total,
         };
         assert_eq!(
             quantity_ref_target_slot_spec(&opponents_damage),

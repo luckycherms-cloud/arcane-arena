@@ -420,6 +420,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::CompanionToHand
         | GameAction::RollPlanarDie
         | GameAction::DiscoverChoice { .. }
+        | GameAction::GraveyardPaidCastChoice { .. }
         | GameAction::CascadeChoice { .. }
         | GameAction::RippleChoice { .. }
         | GameAction::FreeCastWindowChoice { .. }
