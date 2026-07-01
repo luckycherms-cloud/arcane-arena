@@ -14613,6 +14613,39 @@ fn lower_subject_predicate_ast(
                 });
             }
             let mut clause = lower_imperative_clause(&text, ctx);
+            // CR 608.2c + CR 109.4 + CR 115.1: "target <filter>'s controller/owner
+            // <verb>s it" (Arcum Dagsson, Mercy Killing). `parse_subject_application`
+            // records this possessive shift as `affected = ParentTargetController/
+            // Owner` WITH the targeted object carried in `subject.target` (the
+            // anaphoric "its controller" / "that creature's controller" subjects
+            // leave `target = None`, so the pair uniquely identifies the shift).
+            // Declare that object as the ability's `TargetOnly` slot so
+            // `build_target_slots` requires it and the imperative effect's
+            // `ParentTarget` anaphor ("it") — plus `ParentTargetController` in any
+            // following clause ("that player may …") — resolve against it. Mirrors
+            // the player-target ChangeZone / Explore wrapping just below.
+            if matches!(
+                subject.affected,
+                TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+            ) {
+                if let Some(object_target) = subject.target.clone() {
+                    let mut inner = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+                    inner.sub_ability = clause.sub_ability;
+                    inner.multi_target = clause.multi_target;
+                    return ParsedEffectClause {
+                        effect: Effect::TargetOnly {
+                            target: object_target,
+                        },
+                        duration: clause.duration,
+                        sub_ability: Some(Box::new(inner)),
+                        distribute: None,
+                        multi_target: subject.multi_target,
+                        condition: None,
+                        optional: subject.is_optional,
+                        unless_pay: None,
+                    };
+                }
+            }
             // CR 113.1a + CR 611.2: "each <type> you control gains all activated
             // abilities of target <donor>" (Grell Philosopher). The imperative
             // path lowered the verb to `GainActivatedAbilitiesOfTarget` with the

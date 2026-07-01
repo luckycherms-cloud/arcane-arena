@@ -7180,6 +7180,84 @@ mod tests {
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
     }
 
+    /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
+    /// controller sacrifices it. …". The ability must SURFACE a required target
+    /// slot for the artifact creature (before the fix it compiled to a targetless
+    /// `Sacrifice{ParentTarget}` and activated with no target). Only artifact
+    /// creatures are legal; a plain creature is not.
+    #[test]
+    fn build_target_slots_target_controller_sacrifices_it_requires_object_target() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Arcum Dagsson".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent-controlled artifact creature (a legal target).
+        let art_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Ornithopter".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let types = &mut state.objects.get_mut(&art_creature).unwrap().card_types;
+            types.core_types.push(CoreType::Artifact);
+            types.core_types.push(CoreType::Creature);
+        }
+        // A plain (non-artifact) creature — must NOT be a legal target.
+        let plain_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{T}: Target artifact creature's controller sacrifices it. That player may search their library for a noncreature artifact card, put it onto the battlefield, then shuffle.",
+            "Arcum Dagsson",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Artificer".to_string()],
+        );
+        let def = parsed.abilities.first().expect("activated ability parsed");
+        let ability = build_resolved_from_def(def, source, PlayerId(0));
+
+        let slots = build_target_slots(&state, &ability).unwrap();
+        assert_eq!(
+            slots.len(),
+            1,
+            "exactly one object target slot for the artifact creature, got {slots:?}",
+        );
+        assert!(
+            !slots[0].optional,
+            "the artifact-creature target is required"
+        );
+        assert!(
+            slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(art_creature)),
+            "the opponent's artifact creature must be a legal target",
+        );
+        assert!(
+            !slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(plain_creature)),
+            "a non-artifact creature must NOT be a legal target",
+        );
+    }
+
     /// CR 109.4 + CR 707.2: "target opponent creates a token that's a copy of
     /// it" — Wedding Ring's shape. `CopyTokenOf` with a context-ref copy source
     /// (`ParentTarget`) and a `Typed{Opponent}` owner must surface exactly one

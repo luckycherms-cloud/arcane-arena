@@ -1726,7 +1726,38 @@ pub(super) fn parse_subject_application(
         // path of "target creature that player controls becomes …" (Gornog,
         // the Red Reaper) silently bound the target to the trigger
         // controller's own creatures.
-        let (filter, _) = parse_target_with_ctx(subject, ctx);
+        let (filter, rest) = parse_target_with_ctx(subject, ctx);
+        // CR 608.2c + CR 109.4: "target <filter>'s controller/owner <verb>s it"
+        // (Arcum Dagsson, Mercy Killing) — the ability TARGETS <filter>; its
+        // controller/owner performs the verb on it ("it" = that target). Preserve
+        // <filter> as the ability's object target while shifting the acting
+        // subject to the target's controller/owner, so the imperative lowering
+        // declares a `TargetOnly{<filter>}` slot (see `lower_subject_predicate_ast`)
+        // against which `ParentTarget`/`ParentTargetController` resolve. Only the
+        // exact possessive-controller/owner suffix (nothing else) qualifies.
+        if let Ok((_, actor)) = all_consuming(alt((
+            value(
+                TargetFilter::ParentTargetController,
+                alt((
+                    tag::<_, _, OracleError<'_>>("'s controller"),
+                    tag("\u{2019}s controller"),
+                )),
+            ),
+            value(
+                TargetFilter::ParentTargetOwner,
+                alt((tag("'s owner"), tag("\u{2019}s owner"))),
+            ),
+        )))
+        .parse(rest.trim())
+        {
+            return Some(SubjectApplication {
+                affected: actor,
+                target: Some(filter),
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
