@@ -458,7 +458,8 @@ pub fn room_effects(
             (lose, vec![])
         }
         // 4: Cradle of the Death God — "Create The Atropal, a legendary 4/4 black God Horror
-        //    creature token"
+        //    creature token with deathtouch."
+        // CR 702.2a: Deathtouch is a static ability granted to the token.
         (DungeonId::TombOfAnnihilation, 4) => (
             simple(
                 Effect::Token {
@@ -471,7 +472,7 @@ pub fn room_effects(
                         "Horror".to_string(),
                     ],
                     colors: vec![ManaColor::Black],
-                    keywords: vec![],
+                    keywords: vec![Keyword::Deathtouch],
                     tapped: false,
                     count: fixed(1),
                     owner: TargetFilter::Controller,
@@ -1684,6 +1685,46 @@ mod tests {
     #[test]
     fn room_effects_undercity_throne_of_dead_three() {
         assert_throne_room_chain(&undercity_effect(8));
+    }
+
+    fn tomb_effect(room: u8) -> ResolvedAbility {
+        room_effects(
+            DungeonId::TombOfAnnihilation,
+            room,
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .0
+    }
+
+    /// Oracle fidelity: Tomb of Annihilation "Cradle of the Death God" creates
+    /// The Atropal, a legendary 4/4 black God Horror creature token *with
+    /// deathtouch* (CR 702.2a). The token was created with no keywords, dropping
+    /// the deathtouch. Revert-probe: the old `keywords: vec![]` has no Deathtouch.
+    #[test]
+    fn tomb_cradle_atropal_has_deathtouch() {
+        let ability = tomb_effect(4);
+        match &ability.effect {
+            Effect::Token {
+                name,
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(4),
+                keywords,
+                supertypes,
+                ..
+            } => {
+                assert_eq!(name, "The Atropal");
+                assert!(
+                    keywords.contains(&Keyword::Deathtouch),
+                    "The Atropal is created with deathtouch, got keywords {keywords:?}"
+                );
+                assert!(
+                    supertypes.contains(&Supertype::Legendary),
+                    "The Atropal is legendary"
+                );
+            }
+            other => panic!("expected a 4/4 Atropal Token, got {other:?}"),
+        }
     }
 
     fn mad_mage_effect(room: u8) -> ResolvedAbility {
