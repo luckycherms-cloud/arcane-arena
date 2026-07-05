@@ -14331,6 +14331,119 @@ fn enchanted_permanent_is_colorless_forest_land_produces_set_basic_land_type() {
         .contains(&ContinuousModification::SetColor { colors: vec![] }));
 }
 
+// Issue #4770: Imprisoned in the Moon — "Enchanted permanent is a colorless land
+// with "{T}: Add {C}" and loses all other card types and abilities." Must become
+// a colorless land (SetCardTypes + SetColor), lose its own abilities
+// (RemoveAllAbilities), and gain the quoted mana ability (GrantAbility) — with
+// RemoveAllAbilities BEFORE the grant so the granted ability survives the wipe.
+#[test]
+fn imprisoned_in_the_moon_becomes_colorless_land_with_granted_mana_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Land],
+        }),
+        "must become a land: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetColor { colors: vec![] }),
+        "must become colorless: {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities (issue #4770)");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted \"{T}: Add {C}\" ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
+    // Affected = the enchanted permanent.
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => assert!(
+            tf.properties.contains(&FilterProp::EnchantedBy),
+            "affected must be the enchanted permanent: {tf:?}"
+        ),
+        other => panic!("expected Typed EnchantedBy filter, got {other:?}"),
+    }
+}
+
+// Issue #4770 sibling — Sugar Coat: "Enchanted permanent is a colorless Food
+// artifact with "..." and loses all other card types and abilities." Same class
+// as Imprisoned in the Moon but with a SUBTYPE (Food) before the core type. Must
+// emit SetCardTypes(Artifact) + SetColor([]) + AddSubtype(Food) as the Layer-4
+// identity, then RemoveAllAbilities before the granted ability (Layer 6). This
+// is the subtype-before-core-type generalization of the parser.
+#[test]
+fn sugar_coat_becomes_colorless_food_artifact_with_granted_ability() {
+    let def = parse_static_line(
+        "Enchanted permanent is a colorless Food artifact with \"{2}, {T}, Sacrifice this artifact: You gain 3 life\" and loses all other card types and abilities.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Artifact],
+        }),
+        "must become an artifact: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::SetColor { colors: vec![] }),
+        "must become colorless: {mods:?}"
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddSubtype {
+            subtype: "Food".to_string(),
+        }),
+        "must gain the Food subtype (subtype-before-core-type sibling shape): {mods:?}"
+    );
+    // CR 205.1a: setting a subtype replaces existing subtypes from the same set,
+    // so the artifact subtype set must be wiped BEFORE AddSubtype(Food) — else a
+    // host that was already (say) a Clue would end up "Clue Food artifact".
+    let wipe_idx = mods
+        .iter()
+        .position(|m| {
+            matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Artifact
+                }
+            )
+        })
+        .expect("must wipe the artifact subtype set before adding Food (CR 205.1a)");
+    let add_food_idx = mods
+        .iter()
+        .position(
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Food"),
+        )
+        .expect("must add Food");
+    assert!(
+        wipe_idx < add_food_idx,
+        "RemoveAllSubtypes(Artifact) must precede AddSubtype(Food): {mods:?}"
+    );
+    let remove_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::RemoveAllAbilities))
+        .expect("must strip the permanent's own abilities");
+    let grant_idx = mods
+        .iter()
+        .position(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("must grant the quoted sacrifice ability");
+    assert!(
+        remove_idx < grant_idx,
+        "RemoveAllAbilities must precede GrantAbility so the granted ability survives: {mods:?}"
+    );
+}
+
 #[test]
 fn enchanted_permanent_is_forest_land_produces_set_basic_land_type() {
     // CR 305.7: Without color prefix, should still use SetBasicLandType
