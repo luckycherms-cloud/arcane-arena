@@ -10850,6 +10850,7 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
                     .core_types
                     .contains(&crate::types::card_type::CoreType::Creature)
                 && o.power.is_some_and(|power| power > 0)
+                && !crate::game::restrictions::object_cant_tap(state, o.id)
             {
                 Some((o.id, o.power.unwrap_or(0) as u32))
             } else {
