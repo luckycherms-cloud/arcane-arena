@@ -1633,23 +1633,24 @@ pub(super) fn build_spell_meta(
         // off the stack).
         has_x_in_cost: obj.mana_cost.has_x(),
         // CR 708.4 + CR 702.37c / CR 702.168b: `is_face_down` means "this spell is
-        // being CAST FACE DOWN" (morph/disguise/cloak — paying {3} to cast as a 2/2
-        // face-down creature spell), NOT "the object is currently face down". Those
-        // differ: foretell (CR 702.143a), hideaway, and other exile/library
+        // being CAST FACE DOWN" (morph/disguise — paying {3} to cast as a 2/2
+        // face-down creature spell), NOT merely "the object has `face_down = true`".
+        // Those differ: foretell (CR 702.143a), hideaway, and other exile/library
         // concealment set `obj.face_down = true` while the card waits in exile, yet
-        // such a card is CAST FACE UP (CR 702.143c: cast "even if it was cast for a
-        // cost other than a foretell cost"). Mana payment runs against the origin
-        // (exile) zone BEFORE the deferred origin->stack move clears `face_down`, so
-        // sourcing this from raw `obj.face_down` would let a face-up foretold/hideaway
-        // cast wrongly satisfy the `OnlyForFaceDownSpell` spend restriction (Tin
-        // Street Gossip). No engine path casts a spell face down today:
-        // `GameAction::PlayFaceDown` -> `game::morph::play_face_down` moves
-        // hand->battlefield via the zone pipeline and charges no mana, never building
-        // a `PaymentContext::Spell`. So the correct value at every current production
-        // payment site is `false`. When a real CR 702.37c / 708.4 face-down CAST path
-        // is built, set this from that cast's announced face-down intent; the gate
-        // (`ManaRestriction::allows_spell`) already reads this field.
-        is_face_down: false,
+        // such a card is CAST FACE UP (CR 702.143c). So this must NOT be sourced from
+        // raw `obj.face_down` — a foretold face-up cast would wrongly satisfy the
+        // `OnlyForFaceDownSpell` spend restriction (Tin Street Gossip).
+        //
+        // The discriminator is `face_down && back_face.is_some()`: `continue_cast_face_down`
+        // is the ONLY path that reaches a spell payment (`PaymentContext::Spell`) with a
+        // blanked object — it turns the object face down via `apply_face_down_entry_profile`,
+        // which stashes the real card in `back_face` (CR 708.2 copiable-value blank). A
+        // foretold/hideaway object keeps `back_face = None` (its real characteristics are
+        // intact in exile — it is not blanked), so it reads `false` here. Manifest/cloak
+        // objects are face-down permanents put onto the battlefield by effects, never cast
+        // through spell payment, so they never build a `PaymentContext::Spell`. Guarded by
+        // `build_spell_meta_for_foretold_card_is_not_face_down` (casting_tests.rs).
+        is_face_down: obj.face_down && obj.back_face.is_some(),
     })
 }
 
@@ -4696,6 +4697,13 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.37c / CR 702.168b: a face-down cast pays a fixed {3} rather than the
+    // printed mana cost (CR 601.2b alternative cost). This is a synthetic constant,
+    // NOT read from the object — `continue_cast_face_down` has already blanked the
+    // object to `ManaCost::NoCost`, so the `.or()` chain's `obj.mana_cost` fallback
+    // would otherwise make the spell free.
+    let face_down_cost = (casting_variant == CastingVariant::FaceDown)
+        .then(|| crate::types::mana::ManaCost::generic(3));
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
     let next_spell_without_paying = !casting_variant.uses_alternative_cost()
@@ -4937,6 +4945,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(freerunning_cost)
             .or(prowl_cost)
             .or(surge_cost)
+            .or(face_down_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     // CR 601.3b + CR 702.8a: A spell has effective flash from its own keywords
@@ -7650,6 +7659,32 @@ pub fn handle_evoke_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.37c / CR 702.168b + CR 601.2b: Resolve the "cast normally vs cast face
+/// down for {3}" choice for a Morph/Megamorph/Disguise card. On `Alternative`,
+/// route through `continue_cast_face_down` (which blanks the object to a 2/2
+/// before the stack, CR 708.4); on `Normal`, cast the card face up.
+pub fn handle_face_down_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    // Exhaustive match so a future `AlternativeCastDecision` variant is a compile
+    // error here rather than silently routing through one of these two branches.
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            continue_cast_face_down(state, player, object_id, payment_mode, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
 /// CR 702.119a-c: Handle Emerge cost choice and proceed with casting. On
 /// `AlternativeCastDecision::Alternative`, the cast is prepared with
 /// `CastingVariant::Emerge`, which substitutes the emerge mana cost and then
@@ -7877,6 +7912,133 @@ fn continue_cast_with_alternative_spell_face(
     continue_with_prepared(state, player, prepared, events)
 }
 
+/// CR 708.4 + CR 702.37c / CR 702.168b: Cast a Morph/Megamorph/Disguise card
+/// face down. The object is turned face down — blanked to a 2/2 with its real
+/// identity stashed in `back_face` — BEFORE it is put on the stack (CR 708.4),
+/// so every downstream system operates on the face-down object: `visibility`
+/// redacts the stack spell to opponents, it resolves onto the battlefield still
+/// face down (CR 702.37c), and `GameAction::TurnFaceUp` (CR 702.37e) flips it.
+///
+/// This is the face-down analogue of `continue_cast_with_alternative_spell_face`
+/// (which swaps to a printed back face); here the "face" is the synthetic blank
+/// 2/2 produced by the shared `apply_face_down_entry_profile` stash.
+/// CR 702.168a: Disguise's face-down 2/2 carries ward {2}; Morph/Megamorph's
+/// does not. The profile is selected from the card's keyword (not the casting
+/// variant), so `CastingVariant::FaceDown` stays parameterless.
+fn face_down_cast_profile(
+    state: &GameState,
+    object_id: ObjectId,
+) -> crate::types::ability::FaceDownProfile {
+    if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disguise) {
+        crate::types::ability::FaceDownProfile::cloaked_2_2()
+    } else {
+        crate::types::ability::FaceDownProfile::vanilla_2_2()
+    }
+}
+
+/// CR 702.37c / CR 702.37b (megamorph) / CR 702.168b: true when `object_id` carries
+/// an effective morph, megamorph, or disguise keyword (printed or granted, CR 604.1) —
+/// the class of cards castable face down for the {3} alternative cost.
+fn object_has_effective_face_down_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    [
+        KeywordKind::Morph,
+        KeywordKind::Megamorph,
+        KeywordKind::Disguise,
+    ]
+    .iter()
+    .any(|kind| super::keywords::object_has_effective_keyword_kind(state, object_id, *kind))
+}
+
+/// CR 702.37c / CR 702.168b + CR 708.4: Affordability of the fixed {3} face-down
+/// cast cost, evaluated AS A FACE-DOWN spell. The real object is not blanked at
+/// offer time, so this checks payability against a throwaway clone in which the
+/// object has been turned face down exactly as the real cast will — so
+/// `SpellMeta.is_face_down` is `true` and face-down-restricted mana (Tin Street
+/// Gossip's "spend only to cast face-down spells", CR 106.6) is correctly counted
+/// toward the {3}. A face-up affordability check would miss such mana and wrongly
+/// withhold the offer when it is the only way to pay.
+fn can_afford_face_down_cast(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    let profile = face_down_cast_profile(state, object_id);
+    super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
+    can_pay_cost_after_auto_tap(&simulated, player, object_id, cost)
+}
+
+/// CR 708.4 + CR 708.2a: True when the {3} face-down cast is PERMITTED — castable
+/// zone, timing, and cast prohibitions all evaluated against the BLANKED face-down
+/// profile (CR 708.2a: a 2/2 with no name, no subtypes, no mana cost), NOT the
+/// printed face-up object. A name-, color-, or mana-value-conditional prohibition
+/// (Meddling Mage / Nevermore naming this card) applies to the printed face but NOT
+/// to the face-down spell (CR 708.4), so evaluating castability on the un-blanked
+/// object would wrongly suppress the legal face-down cast. Mana affordability is
+/// intentionally EXCLUDED (`prepare_spell_cast` doesn't check it) — callers pair
+/// this with `can_afford_face_down_cast`.
+///
+/// Blanks a throwaway clone exactly as `continue_cast_face_down` blanks the real
+/// object (same `face_down_cast_profile` + `apply_face_down_entry_profile` +
+/// `Some(CastingVariant::FaceDown)` prepare), so `.is_ok()` here predicts the real
+/// face-down cast's prepare step precisely.
+fn face_down_cast_is_permitted(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    let mut simulated = state.clone();
+    let profile = face_down_cast_profile(state, object_id);
+    super::zone_pipeline::apply_face_down_entry_profile(&mut simulated, object_id, &profile);
+    prepare_spell_cast_with_variant_override(
+        &simulated,
+        player,
+        object_id,
+        Some(CastingVariant::FaceDown),
+    )
+    .is_ok()
+}
+
+fn continue_cast_face_down(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let profile = face_down_cast_profile(state, object_id);
+    // CR 708.4: turn the object face down (single-authority 3-step stash) before
+    // it goes on the stack.
+    super::zone_pipeline::apply_face_down_entry_profile(state, object_id, &profile);
+
+    let mut prepared = match prepare_spell_cast_with_variant_override(
+        state,
+        player,
+        object_id,
+        Some(CastingVariant::FaceDown),
+    ) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            // Restore the real face if preparation fails, so a rejected
+            // face-down cast doesn't strand the card blanked in hand.
+            restore_face_down_cast_object(state, object_id);
+            return Err(err);
+        }
+    };
+    prepared.payment_mode = payment_mode;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+/// Undo `apply_face_down_entry_profile`: reveal the stashed real card and clear
+/// the face-down flag. Used only on the error path of a face-down cast that
+/// never reaches the stack (CR 708.9's leave-the-stack reveal is handled
+/// separately by `apply_zone_exit_cleanup`).
+fn restore_face_down_cast_object(state: &mut GameState, object_id: ObjectId) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        if let Some(back_face) = obj.back_face.take() {
+            super::printed_cards::apply_back_face_to_object(obj, back_face);
+        }
+        obj.face_down = false;
+    }
+}
+
 fn continue_cast_with_variant(
     state: &mut GameState,
     player: PlayerId,
@@ -7939,6 +8101,12 @@ fn continue_cast_with_variant(
             payment_mode,
             events,
         );
+    }
+
+    // CR 708.4: face-down casts blank the object to a 2/2 before the stack via
+    // the dedicated single authority.
+    if variant == CastingVariant::FaceDown {
+        return continue_cast_face_down(state, player, object_id, payment_mode, events);
     }
 
     let mut prepared =
@@ -8642,11 +8810,35 @@ fn normal_cast_choice_cost_and_affordability(
         return (ManaCost::NoCost, true);
     }
 
+    // CR 601.2f + CR 118.9a: a pending "cast the next spell without paying its mana
+    // cost" modifier (Omniscience-style one-shot) zeroes the normal-path cost. The
+    // real prep path already treats this as `ManaCost::NoCost`
+    // (prepare_spell_cast_with_variant_override_inner via `next_spell_without_paying`);
+    // mirror it here with the SAME authority so an affordable {3} face-down cost
+    // can't hide the legal FREE face-up normal cast. `CastingVariant::Normal` is not
+    // `uses_alternative_cost()`, so the prep guard reduces to exactly this predicate.
+    if pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+        matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
+    })
+    .is_some()
+    {
+        return (ManaCost::NoCost, true);
+    }
+
     // CR 601.2f + CR 118.9d: normal-path affordability and displayed cost
     // reflect active cost modifiers before comparing against alternative costs.
     let normal_cost = apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
         .unwrap_or_else(|| obj.mana_cost.clone());
-    let normal_affordable = can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+    // CR 118.6: a printed `NoCost` (no mana cost) is an UNPAYABLE cost; the normal
+    // (face-up) cast is not a legal play absent a free-cast permission (handled by
+    // the two short-circuits above). `can_pay_cost_after_auto_tap` returns true for
+    // `NoCost` unconditionally, so guard against reporting an unpayable normal cast
+    // as affordable — that would offer a free face-up cast instead of the {3}
+    // face-down alternative. A cost reduced to nothing is `{0}` (CR 601.2f), a
+    // distinct value from `ManaCost::NoCost`, so this never misfires on a
+    // cost-reduced-to-zero card.
+    let normal_affordable = !matches!(normal_cost, ManaCost::NoCost)
+        && can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
     (normal_cost, normal_affordable)
 }
 
@@ -8690,8 +8882,22 @@ pub fn handle_cast_spell_with_payment_mode(
             // permission (Omniscience) takes this normal path, so don't block it.
             // Defense-in-depth — the candidate generator already excludes the
             // no-permission case via `can_cast_object_now`.
+            //
+            // CR 118.6a + CR 702.37c / CR 702.168b: an unpayable ({NoCost}) card
+            // carrying an effective morph/megamorph/disguise keyword may still be
+            // cast face down for the {3} alternative cost. Let it through to the
+            // face-down offer block below ONLY when that {3} is affordable — the
+            // offer auto-routes and returns there; otherwise the unpayable-cost
+            // rejection stands (nothing downstream re-guards NoCost).
             if matches!(obj.mana_cost, ManaCost::NoCost)
                 && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
+                && !(object_has_effective_face_down_keyword(state, object_id)
+                    && can_afford_face_down_cast(
+                        state,
+                        player,
+                        object_id,
+                        &crate::types::mana::ManaCost::generic(3),
+                    ))
             {
                 return Err(EngineError::InvalidAction(format!(
                     "Cannot cast {object_id:?} from hand — it has no mana cost (CR 118.6)",
@@ -9662,6 +9868,62 @@ pub fn handle_cast_spell_with_payment_mode(
                         events,
                     );
                 }
+            }
+        }
+    }
+
+    // CR 702.37c / CR 702.168b + CR 601.2b: Morph / Megamorph / Disguise face-down
+    // cast. Any card carrying one of these keywords may be cast face down as a 2/2
+    // for a fixed {3} rather than its printed mana cost. Offer the choice when both
+    // the normal cost and the {3} are affordable; auto-route to the face-down cast
+    // when only the {3} is affordable. Eligibility reads the *effective* keyword
+    // kind so a granted morph/disguise (CR 604.1) is honored.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if object_has_effective_face_down_keyword(state, object_id)
+            // CR 702.37c / CR 702.168b: face down may be cast "from any zone from
+            // which you could normally cast it" — gate on the general castable-zone
+            // authority, not a hand-only special case.
+            //
+            // CR 708.4 + CR 708.2a: castability is evaluated against the BLANKED
+            // face-down profile (2/2, no name, no subtypes, no mana cost), not the
+            // printed face-up object. A name- or mana-value-conditional prohibition
+            // (Meddling Mage / Nevermore naming this card) applies to the face-down
+            // characteristics, so it must not suppress the legal {3} face-down offer.
+            // `face_down_cast_is_permitted` blanks a throwaway clone exactly as
+            // `continue_cast_face_down` will, then prepares the FaceDown variant.
+            && face_down_cast_is_permitted(state, player, object_id)
+        {
+            let (normal_cost, normal_affordable) =
+                normal_cast_choice_cost_and_affordability(state, player, object_id, obj);
+            // CR 702.37c / CR 702.168a: the face-down cast cost is always {3}.
+            let face_down_cost = crate::types::mana::ManaCost::generic(3);
+            // Evaluated as a face-down spell (CR 708.4) so face-down-restricted
+            // mana (Tin Street Gossip) counts toward the {3}.
+            let face_down_affordable =
+                can_afford_face_down_cast(state, player, object_id, &face_down_cost);
+            if face_down_affordable {
+                if normal_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::FaceDown,
+                        normal_cost,
+                        alternative_cost: Some(face_down_cost),
+                        alternative_additional_cost: None,
+                    });
+                }
+                // Only the face-down {3} is affordable — proceed face down.
+                return handle_face_down_cost_choice_with_payment_mode(
+                    state,
+                    player,
+                    object_id,
+                    card_id,
+                    crate::types::actions::AlternativeCastDecision::Alternative,
+                    payment_mode,
+                    events,
+                );
             }
         }
     }
@@ -10795,6 +11057,26 @@ pub fn can_cast_object_now_with_probe(
                 return can_cast_object_now_with_probe(&sim, player, object_id, None);
             }
         }
+        // CR 708.4 + CR 702.37c / CR 702.168b: a morph/megamorph/disguise card whose
+        // FACE-UP cast is prohibited (Meddling Mage / Nevermore naming it) fails
+        // `prepare_spell_cast` above on the printed object, yet the {3} FACE-DOWN cast
+        // may still be legal — CR 708.4 applies prohibitions to the face-down
+        // characteristics (no name / no mana value); CR 601.3a lets a player ignore a
+        // qualities-conditional prohibition when a proposal choice (here, casting face
+        // down) changes the qualities it reads. Feasibility twin of the dispatch offer
+        // gate: same keyword scope + {3} affordability + castability against the blanked
+        // profile (which also enforces creature-spell sorcery-speed timing, CR 302.1).
+        if object_has_effective_face_down_keyword(state, object_id)
+            && can_afford_face_down_cast(
+                state,
+                player,
+                object_id,
+                &crate::types::mana::ManaCost::generic(3),
+            )
+            && face_down_cast_is_permitted(state, player, object_id)
+        {
+            return true;
+        }
         let choices = casting_variant_choice_set(state, player, object_id);
         return !choices.options.is_empty();
     };
@@ -10910,9 +11192,22 @@ fn can_cast_prepared_now_with_probe(
     // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
     // Exile-zone copies (Prepare, Suspend, Discover, etc.) carry their own
     // `ExileWithAltCost` permission and must not hit this hand/command guard.
+    //
+    // CR 118.6a + CR 702.37c / CR 702.168b: candidate/legal-action twin of the
+    // dispatch-path exception at the `Zone::Hand` NoCost gate — a NoCost card with
+    // an effective morph/megamorph/disguise keyword IS castable (face down for {3}),
+    // so it must be OFFERED whenever that {3} is affordable. Without this, dispatch
+    // accepts the cast but candidate generation never surfaces it.
     if matches!(obj.zone, Zone::Hand | Zone::Command)
         && matches!(obj.mana_cost, ManaCost::NoCost)
         && !unlimited_hand_cast_free_applies(state, player, obj, prepared.casting_variant)
+        && !(object_has_effective_face_down_keyword(state, prepared.object_id)
+            && can_afford_face_down_cast(
+                state,
+                player,
+                prepared.object_id,
+                &crate::types::mana::ManaCost::generic(3),
+            ))
     {
         return false;
     }
@@ -14706,6 +15001,23 @@ pub fn handle_cancel_cast(
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             clear_prototype_form(obj);
         }
+    }
+
+    if pending.casting_variant == CastingVariant::FaceDown {
+        // CR 601.2i + CR 708.4 + CR 702.37c / CR 702.168b: backing out of a
+        // face-down cast before it completes reveals the stashed real card and
+        // clears the face-down blank, so the object rolls back to its real face in
+        // its origin zone instead of stranding blanked / nameless / no-cost.
+        // `continue_cast_face_down` blanks the object (via
+        // `apply_face_down_entry_profile`) BEFORE payment, and cancelling at any
+        // point after that (e.g. from `WaitingFor::ManaPayment`) must undo it.
+        // Single authority: the same `restore_face_down_cast_object` used on the
+        // prep-failure error path. FaceDown is absent from
+        // `restores_front_face_after_stack_exit()` and
+        // `apply_face_down_entry_profile` never sets `modal_back_face`, so the
+        // alternative-spell-face restore above does not also fire — this branch is
+        // the sole rollback for a canceled face-down cast.
+        restore_face_down_cast_object(state, pending.object_id);
     }
 
     if let Some(source_id) = pending.cancel_restore_prepared_source {
