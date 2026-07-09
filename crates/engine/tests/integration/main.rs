@@ -554,6 +554,7 @@ mod proliferate_zero_counter;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
 mod refurbished_familiar;
+mod render_silent_cant_cast;
 mod repro_pilot_crew;
 mod rhys_evermore_remove_counters;
 mod riot_control_regression;

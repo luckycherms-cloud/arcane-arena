@@ -3362,6 +3362,14 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
                 RestrictionPlayerScope::ParentTargetedPlayer,
                 tag("that player"),
             ),
+            // CR 109.4 + CR 608.2c: "its controller" — the controller of the
+            // parent object target (the countered spell). Bound at resolution via
+            // add_restriction + parent_target_controller. The sub-ability inherits
+            // the counter's target at effects/mod.rs:7441-7450.
+            value(
+                RestrictionPlayerScope::ParentObjectTargetController,
+                tag("its controller"),
+            ),
             // CR 508.5: "defending player" — the player being attacked by the
             // source ("Whenever ~ attacks, defending player can't cast spells
             // this turn." — Xantid Swarm).

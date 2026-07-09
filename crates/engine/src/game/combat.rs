@@ -2929,8 +2929,10 @@ pub fn declare_attackers_with_bands(
                 crate::types::ability::RestrictionPlayerScope::TargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
                 | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-                // CR 109.5: resolved to `SpecificPlayer` by `add_restriction` at
-                // creation time, so an unresolved scope here restricts no one.
+                // CR 109.4 + CR 109.5: resolved to `SpecificPlayer` by
+                // `add_restriction` at creation time, so an unresolved scope here
+                // restricts no one.
+                | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
                 | crate::types::ability::RestrictionPlayerScope::ScopedPlayer => false,
             };
             if !attacker_is_affected {
