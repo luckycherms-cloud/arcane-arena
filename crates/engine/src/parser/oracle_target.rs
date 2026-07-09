@@ -98,6 +98,9 @@ pub(crate) fn resolve_pronoun_target(ctx: &mut ParseContext, pronoun: &str) -> T
         is_bare_object_pronoun(pronoun),
         "resolve_pronoun_target called with non-pronoun token: {pronoun}"
     );
+    if let Some(target) = ctx.object_pronoun_ref.clone() {
+        return target;
+    }
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             resolve_it_pronoun(ctx)

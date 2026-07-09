@@ -1094,6 +1094,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
+        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text),
         in_trigger: true,
         ..Default::default()
     };
@@ -7141,6 +7142,32 @@ fn extract_trigger_subject_for_context(
     let (subject, _) = parse_trigger_subject(after_keyword, ctx);
     ctx.diagnostics.truncate(pre_snapshot);
     subject
+}
+
+fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<TargetFilter> {
+    let lower = condition_text.to_lowercase();
+    let after_keyword = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest)
+    .unwrap_or(&lower);
+
+    // CR 608.2k + CR 601.2a: spell-cast trigger conditions introduce the cast
+    // spell as the effect body's untargeted object antecedent. "it" in
+    // "Whenever you cast a spell, put it ..." names the spell on the stack.
+    let is_spell_cast_trigger = alt((
+        tag::<_, _, OracleError<'_>>("you cast "),
+        tag("a player casts "),
+        tag("an opponent casts "),
+        tag("each opponent casts "),
+        tag("one or more players cast "),
+        tag("enchanted player casts "),
+    ))
+    .parse(after_keyword)
+    .is_ok();
+    is_spell_cast_trigger.then_some(TargetFilter::TriggeringSource)
 }
 
 // ---------------------------------------------------------------------------

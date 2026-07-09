@@ -6918,6 +6918,40 @@ fn trigger_you_cast_this_spell() {
     assert!(def.trigger_zones.contains(&Zone::Stack));
 }
 
+#[test]
+fn spell_cast_trigger_bare_it_binds_triggering_spell() {
+    let def = parse_trigger_line(
+            "Whenever you cast a spell, you may put it on the bottom of its owner's library. If you do, reveal cards from the top of your library until you reveal a nonland card. You may cast that card without paying its mana cost. Then put all revealed cards not cast this way on the bottom of your library in a random order. This ability triggers only once each turn.",
+            "Neera, Wild Mage",
+        );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let execute = def.execute.as_ref().expect("trigger must have an effect");
+    match execute.effect.as_ref() {
+        Effect::PutAtLibraryPosition { target, .. } => {
+            assert_eq!(*target, TargetFilter::TriggeringSource);
+        }
+        other => panic!("expected PutAtLibraryPosition, got {other:?}"),
+    }
+}
+
+#[test]
+fn spell_cast_trigger_created_token_it_keeps_last_created_binding() {
+    fn first_generic_target(def: &AbilityDefinition) -> Option<TargetFilter> {
+        if let Effect::GenericEffect { target, .. } = def.effect.as_ref() {
+            return target.clone();
+        }
+        def.sub_ability.as_deref().and_then(first_generic_target)
+    }
+
+    let def = parse_trigger_line(
+        "Whenever you cast a spell, create a 1/1 white Spirit creature token. It gains haste until end of turn.",
+        "Test Token Cast Trigger",
+    );
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let target = first_generic_target(def.execute.as_deref().expect("trigger must have an effect"));
+    assert_eq!(target, Some(TargetFilter::LastCreated));
+}
+
 /// CR 601.2i + CR 603.2: A self-cast trigger phrased as
 /// "When you cast <CARDNAME>" must produce the same `TriggerMode::SpellCast`
 /// shape (with `valid_card = SelfRef`) as the canonical "When you cast this
