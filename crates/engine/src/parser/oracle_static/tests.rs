@@ -23177,6 +23177,62 @@ fn top_of_library_cast_permission_crystal_skull_historic_disjunctive() {
     );
 }
 
+/// CR 305.1 + CR 401.5 + CR 601.2a: Case of the Locked Hothouse — the solved reward uses a
+/// simple land branch plus a compound spell branch ("creature and enchantment
+/// spells"). The mixed disjunction must still lower to one `Play` permission.
+#[test]
+fn top_of_library_cast_permission_locked_hothouse_mixed_disjunctive() {
+    let text =
+        "You may play lands and cast creature and enchantment spells from the top of your library.";
+    let lower = text.to_lowercase();
+    let def = try_parse_top_of_library_cast_permission(text, &lower)
+        .expect("Case of the Locked Hothouse reward must parse");
+    match def.mode {
+        StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            frequency,
+            ref alt_cost,
+        } => {
+            assert_eq!(play_mode, CardPlayMode::Play);
+            assert_eq!(frequency, CastFrequency::Unlimited);
+            assert!(alt_cost.is_none());
+        }
+        other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+    }
+    let filter = def.affected.expect("affected filter set");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or over land / creature-or-enchantment branches, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land branch, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Or { filters: spell_filters }
+                if spell_filters.len() == 2
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    ))
+                    && spell_filters.iter().any(|f| matches!(
+                        f,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Enchantment)
+                    ))
+        ),
+        "expected creature-or-enchantment spell branch, got {:?}",
+        filters[1]
+    );
+}
+
 #[test]
 fn top_of_library_cast_permission_keeps_as_long_as_condition() {
     let text = "You may cast creature spells from the top of your library as long as you control three or more creatures with different powers.";
