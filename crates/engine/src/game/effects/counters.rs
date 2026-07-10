@@ -579,6 +579,45 @@ fn apply_pending_counter_post_action(
             remaining_modifications,
             events,
         ),
+        action @ PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry { .. } => {
+            // CR 111.1 + CR 603.6a + CR 614.12a: a liminal token may have
+            // been committed to the battlefield before an ETB-counter
+            // replacement paused. Finish the same token-entry tail after that
+            // replacement resolves so the battlefield object is not stranded
+            // without abilities, entry events, or delayed cleanup.
+            super::token::finalize_committed_liminal_token_entry_from_action(state, action, events)
+        }
+        PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
+            state,
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+            events,
+        ),
+        PendingCounterPostAction::EmitCommittedCopyTokenEntry {
+            object_id,
+            name,
+            source_id,
+        } => {
+            super::token::push_committed_token_entry_events(
+                state, object_id, name, source_id, events,
+            );
+            if !state.last_created_token_ids.contains(&object_id) {
+                state.last_created_token_ids.push(object_id);
+            }
+            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+                pending.created_ids = state.last_created_token_ids.clone();
+            }
+            true
+        }
         PendingCounterPostAction::ClearPendingEtbCounters { object_id } => {
             state
                 .pending_etb_counters
