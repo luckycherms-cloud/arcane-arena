@@ -27068,6 +27068,14 @@ fn return_destination_face_down_before_control_splice() {
     );
 }
 
+/// CR 508.4: bare "onto the battlefield attacking" without tapped.
+#[test]
+fn parse_battlefield_entry_qualifiers_bare_attacking() {
+    let (tapped, attacking) = parse_battlefield_entry_qualifiers(" attacking");
+    assert!(!tapped);
+    assert!(attacking);
+}
+
 /// CR 508.4: "return it to the battlefield tapped and attacking" (Jocasta,
 /// Automaton Avenger) must lower with both `enter_tapped` and
 /// `enters_attacking` when the anaphor refers to the trigger source.

@@ -1094,7 +1094,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
         pending_mana_symbol_count_color,
-        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text),
+        object_pronoun_ref: trigger_object_pronoun_ref_for_condition(condition_text)
+            .or_else(|| trigger_object_pronoun_ref_for_intervening_if(&if_condition)),
         in_trigger: true,
         ..Default::default()
     };
@@ -1504,7 +1505,7 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         .map(trigger_condition_source_zones)
         .unwrap_or_default();
     if !condition_zones.is_empty() {
-        def.trigger_zones = condition_zones;
+        def.trigger_zones = condition_zones.clone();
     } else if matches!(def.valid_card, Some(TargetFilter::SelfRef))
         && def.destination == Some(Zone::Graveyard)
     {
@@ -1515,6 +1516,18 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         .and_then(|execute| self_recursion_trigger_zone(execute, modifiers.effect_lower.as_str()))
     {
         def.trigger_zones = vec![zone];
+    }
+
+    // CR 608.2c: Off-battlefield source-return triggers (Senu, Keen-Eyed
+    // Protector) bind "it" to the ability source, not the event referent that
+    // satisfied `valid_card`.
+    if condition_zones
+        .iter()
+        .any(|zone| *zone != Zone::Battlefield)
+    {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rewrite_off_battlefield_source_self_target(execute);
+        }
     }
 
     stamp_self_return_origin_from_trigger_condition(&mut def);
@@ -7275,7 +7288,67 @@ fn trigger_object_pronoun_ref_for_condition(condition_text: &str) -> Option<Targ
     ))
     .parse(after_keyword)
     .is_ok();
-    is_spell_cast_trigger.then_some(TargetFilter::TriggeringSource)
+    if is_spell_cast_trigger {
+        return Some(TargetFilter::TriggeringSource);
+    }
+
+    None
+}
+
+/// CR 608.2k: When an intervening-if pins the trigger source off the
+/// battlefield (`SourceInZone` not Battlefield), object anaphors in the effect
+/// body refer to the source card, not the event's `valid_card`.
+fn trigger_object_pronoun_ref_for_intervening_if(
+    if_condition: &Option<TriggerCondition>,
+) -> Option<TargetFilter> {
+    fn pins_source_off_battlefield(condition: &TriggerCondition) -> bool {
+        match condition {
+            TriggerCondition::SourceInZone { zone } => *zone != Zone::Battlefield,
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+                conditions.iter().any(pins_source_off_battlefield)
+            }
+            TriggerCondition::Not { condition } => pins_source_off_battlefield(condition),
+            _ => false,
+        }
+    }
+
+    if_condition
+        .as_ref()
+        .filter(|condition| pins_source_off_battlefield(condition))
+        .map(|_| TargetFilter::SelfRef)
+}
+
+/// CR 608.2c: Rewrite a trigger body's self-return anaphor from `ParentTarget`
+/// to `SelfRef` when the source is registered off the battlefield. Only
+/// `ParentTarget` is rewritten — `TriggeringSource` ("that creature" referring
+/// to the event object) is left intact.
+fn rewrite_off_battlefield_source_self_target(ability: &mut AbilityDefinition) {
+    fn rewrite_parent_target(target: &mut TargetFilter) {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SelfRef;
+        }
+    }
+
+    fn walk(ability: &mut AbilityDefinition) {
+        match ability.effect.as_mut() {
+            Effect::ChangeZone { target, .. } => rewrite_parent_target(target),
+            Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
+                rewrite_parent_target(target);
+            }
+            Effect::ApplyPerpetual { target, .. } => rewrite_parent_target(target),
+            Effect::GenericEffect {
+                target: Some(t), ..
+            } => rewrite_parent_target(t),
+            _ => {}
+        }
+        if let Some(sub) = ability.sub_ability.as_deref_mut() {
+            walk(sub);
+        }
+        if let Some(els) = ability.else_ability.as_deref_mut() {
+            walk(els);
+        }
+    }
+    walk(ability);
 }
 
 // ---------------------------------------------------------------------------

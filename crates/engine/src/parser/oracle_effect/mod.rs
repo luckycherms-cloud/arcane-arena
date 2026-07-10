@@ -27646,6 +27646,14 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     if scan_at_boundaries(tapped_and_attacking_clause) {
         return (true, true);
     }
+    // CR 508.4: bare "attacking" without tapped ("put it onto the battlefield
+    // attacking" — Senu, Keen-Eyed Protector).
+    fn attacking_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        preceded(tag(" attacking"), qualifier_boundary).parse(input)
+    }
+    if scan_at_boundaries(attacking_clause) {
+        return (false, true);
+    }
     if scan_at_boundaries(tapped_clause) {
         return (true, false);
     }

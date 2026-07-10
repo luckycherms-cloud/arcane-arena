@@ -6173,6 +6173,23 @@ pub(super) fn strip_return_destination_ext_with_remainder(
             true,
             true,
         ),
+        // CR 508.4: bare "attacking" without tapped (Senu, Keen-Eyed Protector).
+        (
+            " onto the battlefield attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            false,
+            true,
+        ),
+        (
+            " to the battlefield attacking",
+            Zone::Battlefield,
+            false,
+            false,
+            false,
+            true,
+        ),
         // Tapped + control variants (must precede shorter "tapped" and "under X control")
         (
             " to the battlefield tapped under their owners' control",
