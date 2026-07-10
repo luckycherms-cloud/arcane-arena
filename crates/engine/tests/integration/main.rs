@@ -61,6 +61,7 @@ mod craft_tithing_blade_transform;
 mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod cumber_stone_opponent_debuff;
+mod cunning_rhetoric_attacks_you_scope_4736;
 mod curse_attack_triggers;
 mod curse_c17_when_enchanted_player_attacked_cycle;
 mod curse_co_departed_enchanted_player_trigger;
