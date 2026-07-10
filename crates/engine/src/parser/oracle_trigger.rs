@@ -1148,6 +1148,20 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
+        // CR 700.3 + CR 701.20a: Pile-separation (Fact or Fiction / Sphinx of
+        // Uthuun family). The multi-sentence block must be consumed as a single
+        // unit — chain parsing would fragment it into Unimplemented chunks.
+        } else if let Some(pile_def) =
+            crate::parser::oracle_separate_piles::parse_separate_into_piles(
+                &effect_for_parse,
+                AbilityKind::Spell,
+            )
+        {
+            let mut ability = pile_def;
+            if optional {
+                ability.optional = true;
+            }
+            Some(TriggerBody::PreLowered(Box::new(ability)))
         } else {
             try_parse_exile_top_each_library_with_collection_counter(
                 &effect_for_parse,
