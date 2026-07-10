@@ -2800,6 +2800,27 @@ fn trigger_attacks_you_or_planeswalker_you_control() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+/// Issue #4744 — Curse of Predation: "Whenever a creature attacks enchanted
+/// player, put a +1/+1 counter on it." The "enchanted player" defender scope
+/// must bind to the Aura's attached player (`valid_target = AttachedTo`), not be
+/// dropped — otherwise the trigger fires whenever any creature attacks anyone
+/// (CR 303.4e). Runtime firing is covered by the discriminating integration
+/// test `curse_of_predation_scopes_counter_to_enchanted_player`.
+#[test]
+fn trigger_attacks_enchanted_player_scopes_to_attached_player() {
+    let def = parse_trigger_line(
+        "Whenever a creature attacks enchanted player, put a +1/+1 counter on it.",
+        "Curse of Predation",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::AttachedTo),
+        "'attacks enchanted player' must scope the defender to the attached player"
+    );
+}
+
 #[test]
 fn opponent_attacks_that_player_library_binds_to_triggering_player() {
     let def = parse_trigger_line(

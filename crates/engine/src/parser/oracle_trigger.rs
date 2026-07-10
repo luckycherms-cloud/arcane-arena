@@ -8727,6 +8727,13 @@ fn try_parse_event(
                 value(AttackTargetFilter::Player, tag(" one of your opponents")),
                 value(AttackTargetFilter::Player, tag(" a player")),
                 value(AttackTargetFilter::Player, tag(" you")),
+                // CR 303.4e: "attacks enchanted player" — a Curse Aura trigger
+                // scoped to the player this permanent is attached to (whose
+                // controller is separate from the Aura's controller). The type axis
+                // is Player; the player-identity scope is set below via
+                // `valid_target = AttachedTo` (Curse of Predation, Curse of Chaos,
+                // Curse of Inertia).
+                value(AttackTargetFilter::Player, tag(" enchanted player")),
                 value(AttackTargetFilter::Battle, tag(" a battle")),
             ))
             .parse(input)
@@ -8772,6 +8779,19 @@ fn try_parse_event(
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             ));
+        } else if tag::<_, _, OracleError<'_>>(" enchanted player")
+            .parse(after)
+            .is_ok()
+        {
+            // CR 303.4e: "attacks enchanted player" scopes the trigger to the
+            // player this Curse Aura is attached to (whose controller is distinct
+            // from the Aura's controller). `AttachedTo` resolves to
+            // `source.attached_to.as_player()` in `player_matches_filter`
+            // (`game/trigger_matchers.rs`), so the trigger fires only when the
+            // enchanted player is the defender (Curse of Predation, Curse of Chaos,
+            // Curse of Inertia). Without this the trigger has no defender scope and
+            // fires on every attack, anywhere.
+            def.valid_target = Some(TargetFilter::AttachedTo);
         } else if matches!(
             def.attack_target_filter,
             Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
