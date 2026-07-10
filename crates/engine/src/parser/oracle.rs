@@ -910,6 +910,8 @@ fn parse_static_line_with_graveyard_keyword_continuation(
         vec![def]
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
+    } else if let Some(def) = crate::parser::oracle_static::try_parse_counts_as_named_static(line) {
+        vec![def]
     } else {
         parse_static_line_multi(line)
     };

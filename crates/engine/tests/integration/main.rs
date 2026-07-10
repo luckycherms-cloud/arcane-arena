@@ -81,6 +81,7 @@ mod destroy_redirect_to_battlefield_delivery_tail;
 mod devour_co_entry_regression;
 mod devour_intellect_treasure_rider;
 mod dig_rest_pile_stranding_on_etb_pause;
+mod diligent_farmhand_counts_as_named;
 mod divine_visitation_token_substitution;
 mod doran_attack_block_pump;
 mod double_strike_first_strike_trigger_removes_attacker;

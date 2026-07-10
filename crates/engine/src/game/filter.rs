@@ -27,6 +27,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 /// True when the filter's matched SET depends on the population of objects on
@@ -3643,8 +3644,26 @@ fn matches_filter_prop(
         // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
         // no activated, triggered, replacement, or static abilities.
         FilterProp::HasNoAbilities => object_has_no_abilities(obj),
-        // CR 201.2: Name matching is exact (case-insensitive comparison).
-        FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
+        // CR 201.2a: Name matching is exact (case-insensitive comparison).
+        // Also check CountsAsNamed statics (Odyssey Burst cycle).
+        // NOTE: The alias applies to ANY FilterProp::Named check, not only effects
+        // from spells named X. This is safe for the entire Burst cycle because each
+        // Burst spell is the only effect referencing its own name — but if a future
+        // non-self-referential "counts as named" card appears, this may need a
+        // source-filter check.
+        FilterProp::Named { name } => {
+            obj.name.eq_ignore_ascii_case(name)
+                || obj.static_definitions.iter_all().any(|sd| {
+                    // Only count the alias if the static's active_zones include
+                    // the object's current zone (or active_zones is empty = always).
+                    if let StaticMode::CountsAsNamed { name: alias } = &sd.mode {
+                        (sd.active_zones.is_empty() || sd.active_zones.contains(&obj.zone))
+                            && alias.eq_ignore_ascii_case(name)
+                    } else {
+                        false
+                    }
+                })
+        }
         // SameName: matches objects with the same name as the tracked card from context.
         // At runtime, this checks against the source object's name (the event context card).
         FilterProp::SameName => {
