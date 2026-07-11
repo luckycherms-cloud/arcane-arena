@@ -23,9 +23,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    ForEachCategoryAction, LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -466,8 +467,12 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
                 rest_destination,
                 ..
             },
-            Effect::ForEachCategoryExile {
-                zone: Zone::Library,
+            Effect::ForEachCategory {
+                action:
+                    ForEachCategoryAction::ExileFromPool {
+                        zone: Zone::Library,
+                        ..
+                    },
                 ..
             },
         ) = (&mut *def.effect, &*sub.effect)
@@ -5570,7 +5575,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::RememberCard { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::EachPlayerCopyChosen { .. }

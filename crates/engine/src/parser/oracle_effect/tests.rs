@@ -2,7 +2,7 @@ use super::*;
 use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
-use crate::types::ability::{AttachmentKind, PerpetualModification};
+use crate::types::ability::{AttachmentKind, ForEachCategoryAction, PerpetualModification};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::statics::CostModifyMode;
@@ -554,9 +554,9 @@ fn for_each_card_type_exile_from_among_them() {
     assert!(
         matches!(
             effect,
-            Effect::ForEachCategoryExile {
+            Effect::ForEachCategory {
                 category: IterationCategory::CardType,
-                up_to: true,
+                action: ForEachCategoryAction::ExileFromPool { up_to: true, .. },
                 ..
             }
         ),
@@ -579,9 +579,9 @@ fn for_each_color_exile_from_revealed_cards() {
             assert!(
                 matches!(
                     effect,
-                    Effect::ForEachCategoryExile {
+                    Effect::ForEachCategory {
                         category: IterationCategory::Color,
-                        up_to: true,
+                        action: ForEachCategoryAction::ExileFromPool { up_to: true, .. },
                         ..
                     }
                 ),
@@ -590,7 +590,88 @@ fn for_each_color_exile_from_revealed_cards() {
         }
 }
 
-/// CR 608.2c: the for-each-category EXILE parser must NOT swallow the
+/// CR 105.1 + CR 122.1: "for each color, put a +1/+1 counter on a Dragon you
+/// control of that color" parses to `ForEachCategoryPutCounter` (Call the Spirit
+/// Dragons).
+#[test]
+fn for_each_color_put_counter_on_typed_permanent_of_that_color() {
+    use crate::types::ability::IterationCategory;
+    use crate::types::counter::CounterType;
+
+    let effect =
+        parse_effect("for each color, put a +1/+1 counter on a Dragon you control of that color");
+    assert!(
+        matches!(
+            effect,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                action: ForEachCategoryAction::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected ForEachCategoryPutCounter(Color), got {effect:?}"
+    );
+}
+
+/// CR 608.2c + CR 104.2b: Call the Spirit Dragons upkeep chains per-color
+/// counter placement with a gated win rider.
+#[test]
+fn call_the_spirit_dragons_upkeep_parses_put_counter_and_win_rider() {
+    use crate::types::ability::{
+        AbilityCondition, Comparator, IterationCategory, QuantityExpr, QuantityRef,
+    };
+    use crate::types::counter::CounterType;
+    let def = parse_effect_chain(
+        "for each color, put a +1/+1 counter on a Dragon you control of that color. \
+         If you put +1/+1 counters on five Dragons this way, you win the game.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                action: ForEachCategoryAction::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                },
+                ..
+            }
+        ),
+        "expected ForEachCategoryPutCounter, got {:?}",
+        def.effect
+    );
+    let win = def
+        .sub_ability
+        .as_ref()
+        .expect("win rider must chain after counter placement");
+    assert!(
+        matches!(win.effect.as_ref(), Effect::WinTheGame { .. }),
+        "expected WinTheGame sub_ability, got {:?}",
+        win.effect
+    );
+    let Some(AbilityCondition::QuantityCheck {
+        lhs,
+        comparator,
+        rhs,
+    }) = win.condition.as_ref()
+    else {
+        panic!("WinTheGame must be gated, got {:?}", win.condition);
+    };
+    assert_eq!(*comparator, Comparator::GE);
+    assert!(matches!(
+        lhs,
+        QuantityExpr::Ref {
+            qty: QuantityRef::FilteredTrackedSetSize { .. },
+        }
+    ));
+    assert!(matches!(rhs, QuantityExpr::Fixed { value: 5 }));
+}
+
+/// CR 608.2c: the for-each-category PUT-counter parser must NOT swallow the
 /// distinct-types PUT-to-hand form — "for each card type, you may put a card
 /// of that type from among the revealed cards into your hand" is a different
 /// instruction (put, not exile) and must still route to the distinct-types
@@ -31471,14 +31552,17 @@ fn sanar_vivid_reveal_until_keeps_library_pile_for_per_color_exile() {
     assert!(
         matches!(
             exile.effect.as_ref(),
-            Effect::ForEachCategoryExile {
+            Effect::ForEachCategory {
                 category: IterationCategory::Color,
-                zone: Zone::Library,
-                up_to: true,
+                action: ForEachCategoryAction::ExileFromPool {
+                    zone: Zone::Library,
+                    up_to: true,
+                    ..
+                },
                 ..
             }
         ),
-        "expected ForEachCategoryExile, got {:?}",
+        "expected ForEachCategory(ExileFromPool), got {:?}",
         exile.effect
     );
 }

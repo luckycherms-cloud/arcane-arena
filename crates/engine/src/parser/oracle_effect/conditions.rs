@@ -870,6 +870,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
         if let Ok((after_clause, condition)) =
             nom_cond::parse_you_control_or_returned_this_way_condition(rest)
                 .or_else(|_| nom_cond::parse_you_put_into_hand_this_way_condition(rest))
+                .or_else(|_| nom_cond::parse_you_put_counters_on_type_this_way_condition(rest))
                 .or_else(|_| nom_cond::parse_you_draw_this_way_condition(rest))
         {
             let body_lower = strip_reflexive_conditional_body_separator(after_clause);
@@ -6629,6 +6630,26 @@ mod tests {
         assert!(type_filters
             .iter()
             .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Town"))));
+    }
+
+    #[test]
+    fn s07_if_put_counters_on_type_this_way() {
+        // Call the Spirit Dragons: "if you put +1/+1 counters on five Dragons this way".
+        let (cond, body) = strip_if_you_do_conditional(
+            "if you put +1/+1 counters on five Dragons this way, you win the game",
+        );
+        assert_eq!(body, "you win the game");
+        assert!(
+            matches!(
+                cond,
+                Some(AbilityCondition::QuantityCheck {
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 5 },
+                    ..
+                })
+            ),
+            "got {cond:?}"
+        );
     }
 
     #[test]

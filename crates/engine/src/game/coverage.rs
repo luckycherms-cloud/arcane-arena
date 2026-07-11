@@ -20,13 +20,13 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
     DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction, LibraryPosition, ManaProduction,
-    ObjectProperty, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
+    LibraryPosition, ManaProduction, ObjectProperty, ObjectScope, PerpetualModification,
+    PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
+    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3146,7 +3146,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::RememberCard { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
-        Effect::ForEachCategoryExile { category, zone, .. } => {
+        Effect::ForEachCategory { category, action, .. } => {
             d.push((
                 "category".into(),
                 match category {
@@ -3154,7 +3154,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     crate::types::ability::IterationCategory::CardType => "card type".to_string(),
                 },
             ));
-            d.push(("zone".into(), fmt_zone(zone)));
+            match action {
+                ForEachCategoryAction::ExileFromPool { zone, .. } => {
+                    d.push(("zone".into(), fmt_zone(zone)));
+                }
+                ForEachCategoryAction::PutCounter {
+                    target,
+                    counter_type,
+                    ..
+                } => {
+                    d.push(("target".into(), fmt_target(target)));
+                    d.push(("counter_type".into(), counter_type.as_str().to_string()));
+                }
+            }
         }
         Effect::ChooseObjectsIntoTrackedSet {
             chooser,

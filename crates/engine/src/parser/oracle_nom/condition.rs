@@ -8072,6 +8072,57 @@ pub fn parse_you_put_into_hand_this_way_condition(
     Ok((rest, AbilityCondition::ZoneChangedThisWay { filter }))
 }
 
+/// CR 608.2c + CR 122.1: Parse "you put [counter type] counters on [N] [type]
+/// this way" — active-voice reflexive gate for counter-placement producers
+/// (Call the Spirit Dragons: "If you put +1/+1 counters on five Dragons this
+/// way, you win the game"). Counts filtered tracked-set members matching the
+/// type phrase against the parsed threshold.
+pub fn parse_you_put_counters_on_type_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    let (rest, _) = tag("you put ").parse(input)?;
+    let (rest, _) = opt(terminated(
+        super::primitives::parse_counter_type_typed,
+        alt((tag(" counters "), tag(" counter "))),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("on ").parse(rest)?;
+    let (count_expr, rest) =
+        crate::parser::oracle_util::parse_count_expr(rest).ok_or_else(|| {
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+        })?;
+    let threshold = match count_expr {
+        QuantityExpr::Fixed { value } => value,
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
+        }
+    };
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, _) = tag("this way").parse(after_filter.trim())?;
+    Ok((
+        rest,
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: threshold },
+        },
+    ))
+}
+
 /// CR 400.7 + CR 608.2c: Parse "returned [quantifier] [type] to your hand this
 /// way" — the passive/elided-subject bounce gate (Cache Grab's disjunct:
 /// "returned a Squirrel card to your hand this way"). Returns the matched type

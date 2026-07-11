@@ -5711,12 +5711,13 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
     }
 
     Some(ParsedEffectClause {
-        effect: Effect::ForEachCategoryExile {
+        effect: Effect::ForEachCategory {
             category,
-            // The pool cards were revealed from the top of the library.
-            zone: Zone::Library,
             chooser: crate::types::ability::Chooser::Controller,
-            up_to: true,
+            action: crate::types::ability::ForEachCategoryAction::ExileFromPool {
+                zone: Zone::Library,
+                up_to: true,
+            },
         },
         duration: None,
         sub_ability: None,
@@ -5728,6 +5729,102 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 608.2c + CR 105.1 / CR 122.1: Parse the for-each-category put-counter
+/// clause — "for each color, put a +1/+1 counter on a Dragon you control of
+/// that color" (Call the Spirit Dragons). Composes the category axis and the
+/// "of that color/type" anaphoric target restriction rather than enumerating
+/// each sentence. Emits [`Effect::ForEachCategoryPutCounter`].
+fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    type E<'a> = OracleError<'a>;
+    use crate::types::ability::IterationCategory;
+
+    let (rest, _) = tag::<_, _, E>("for each ").parse(tp.lower).ok()?;
+    let (rest, category) = alt((
+        value(
+            IterationCategory::Color,
+            (
+                opt(tag::<_, _, E>("of those ")),
+                tag("color"),
+                opt(tag::<_, _, E>("s")),
+            ),
+        ),
+        value(
+            IterationCategory::CardType,
+            (
+                opt(tag::<_, _, E>("of those ")),
+                tag("card type"),
+                opt(tag::<_, _, E>("s")),
+            ),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, E>(", put ").parse(rest).ok()?;
+    let (rest, _) = nom_primitives::parse_article.parse(rest).ok()?;
+    let (rest, counter_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
+    let (rest, _) = tag::<_, _, E>(" counter on ").parse(rest).ok()?;
+    let (target, rest) = parse_type_phrase(rest);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    let member_suffix = match category {
+        IterationCategory::Color => "of that color",
+        IterationCategory::CardType => "of that type",
+    };
+    let rest = rest.trim();
+    if !rest.starts_with(member_suffix) {
+        return None;
+    }
+    if !rest[member_suffix.len()..].trim().is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::ForEachCategory {
+            category,
+            chooser: crate::types::ability::Chooser::Controller,
+            action: crate::types::ability::ForEachCategoryAction::PutCounter {
+                target,
+                counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+#[cfg(test)]
+mod for_each_category_put_counter_tests {
+    use super::*;
+    use crate::types::ability::IterationCategory;
+    use crate::types::counter::CounterType;
+
+    #[test]
+    fn combinator_matches_call_the_spirit_dragons_clause() {
+        let text = "for each color, put a +1/+1 counter on a Dragon you control of that color";
+        let lower = text.to_ascii_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let clause = try_parse_for_each_category_put_counter(tp).expect("combinator must match");
+        assert!(matches!(
+            clause.effect,
+            Effect::ForEachCategory {
+                category: IterationCategory::Color,
+                action: crate::types::ability::ForEachCategoryAction::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
 }
 
 fn unless_rider_defers_to_body_parser(text: &str) -> bool {
@@ -7249,6 +7346,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     if let Some(clause) = try_parse_for_each_category_exile(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_for_each_category_put_counter(tp) {
         return clause;
     }
 

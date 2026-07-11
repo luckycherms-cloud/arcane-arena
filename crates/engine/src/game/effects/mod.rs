@@ -3354,7 +3354,7 @@ pub fn resolve_effect(
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
-        Effect::ForEachCategoryExile { .. } => {
+        Effect::ForEachCategory { .. } => {
             choose_from_zone::resolve_for_each_category(state, ability, events)
         }
         Effect::ChooseObjectsIntoTrackedSet { .. } => {
