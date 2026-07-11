@@ -1848,16 +1848,15 @@ fn filter_inner_for_object(
         // of looking up the literal sentinel id and matching nothing. With no
         // set published, a sentinel still matches nothing (fail-closed).
         //
-        // Ladder inventory (deliberate, per review on #5505): the FILTER-level
-        // `targeting::resolve_tracked_set_sentinel` inserts one extra rung
-        // between chain and latest — `current_combat_damage_source_filter`
-        // (CR 510.2), which yields a `TargetFilter` rather than an id and so
-        // cannot fold into the shared id helper. The `TrackedSetFiltered`
-        // sibling arm below still carries its own pre-existing ladder (no chain
-        // rung; `max_by_key` over ALL sets including empty ones) — unifying it
-        // onto `resolve_tracked_set_id` would change empty-set shadowing for
-        // the Zimone's Experiment / Living Death class and is left to a
-        // follow-up rather than smuggled into this fix.
+        // Ladder inventory (per reviews on #5505 / #5512): every id-level
+        // `TrackedSetId(0)` consumer — this arm AND the `TrackedSetFiltered`
+        // sibling below (unified by #5512) — resolves through
+        // `resolve_tracked_set_id` (chain → latest non-empty). The one
+        // remaining, legitimately separate ladder is the FILTER-level
+        // `targeting::resolve_tracked_set_sentinel`, which inserts an extra
+        // rung between chain and latest — `current_combat_damage_source_filter`
+        // (CR 510.2) — that yields a `TargetFilter` rather than an id and so
+        // cannot fold into the shared id helper.
         TargetFilter::TrackedSet { id } => {
             let set_id = if id.0 == 0 {
                 crate::game::targeting::resolve_tracked_set_id(state)
@@ -1872,26 +1871,30 @@ fn filter_inner_for_object(
         // type filter. Used by Zimone's Experiment to route "X cards revealed
         // this way" — the Dig resolver populates a tracked set with the kept
         // (revealed) cards; this filter restricts the target space to the
-        // subset matching the inner type. The `id` here is already concrete:
-        // the parser emits `TrackedSetId(0)` as a sentinel, but every resolver
-        // path binds it to a real set before this match is reached via
-        // `targeting::resolve_tracked_set_sentinel`. A still-sentinel `0`
-        // therefore matches no objects, which is the correct fallback when no
-        // tracked set is available.
+        // subset matching the inner type. Resolver paths usually bind the
+        // parser's `TrackedSetId(0)` sentinel to a real set before this match
+        // is reached (via `targeting::resolve_tracked_set_sentinel`); a
+        // still-sentinel `0` resolves through the shared id ladder below,
+        // identically to the sibling `TrackedSet` arm (#5512). With no set
+        // published it matches no objects — the correct fail-closed fallback.
         TargetFilter::TrackedSetFiltered {
             id,
             filter,
             caused_by,
         } => {
             // CR 608.2c: `TrackedSetId(0)` is a sentinel for "the most recent
-            // tracked set"; resolve it to the concrete set so the `caused_by`
-            // check can consult the same set's producer-action provenance.
+            // tracked set"; resolve it through the single id-resolution
+            // authority (`resolve_tracked_set_id`: chain set first, else the
+            // latest NON-EMPTY published set) so (a) a set published by the
+            // active resolution chain is preferred, and (b) a trailing empty
+            // set with a higher id cannot shadow an earlier populated one —
+            // the same ladder every other `TrackedSetId(0)` consumer uses
+            // (#5512 unified this arm's previously divergent ladder). The
+            // resolved id also keys the `caused_by` provenance lookup, so
+            // producer-action checks consult the same set that was matched.
             let resolved = if id.0 == 0 {
-                state
-                    .tracked_object_sets
-                    .iter()
-                    .max_by_key(|(tracked_id, _)| tracked_id.0)
-                    .map(|(tracked_id, set)| (*tracked_id, set))
+                crate::game::targeting::resolve_tracked_set_id(state)
+                    .and_then(|sid| state.tracked_object_sets.get(&sid).map(|set| (sid, set)))
             } else {
                 state.tracked_object_sets.get(id).map(|set| (*id, set))
             };
@@ -8500,6 +8503,147 @@ mod tests {
         assert!(matches_target_filter(&state, chosen, &all_others, chosen));
         assert!(matches_target_filter(&state, other_a, &all_others, chosen));
         assert!(matches_target_filter(&state, other_b, &all_others, chosen));
+    }
+
+    /// Builds the sentinel `TrackedSetFiltered` consumers use ("X cards revealed
+    /// this way", "exiled this way"): `id: 0`, an inner creature type filter,
+    /// and an optional producer-action binding.
+    fn sentinel_tracked_set_filtered(
+        caused_by: Option<crate::types::ability::ThisWayCause>,
+    ) -> TargetFilter {
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by,
+        }
+    }
+
+    /// #5512 failure mode 2 (empty-set shadowing): `TrackedSetFiltered`'s
+    /// sentinel previously resolved via `max_by_key` over ALL sets, so a
+    /// trailing EMPTY set with a higher id shadowed an earlier populated one
+    /// and the filter matched nothing. Routed through
+    /// `resolve_tracked_set_id`, the latest NON-EMPTY set wins.
+    #[test]
+    fn tracked_set_filtered_sentinel_skips_trailing_empty_set() {
+        let mut state = setup();
+        let member = add_creature(&mut state, PlayerId(0), "Set Member");
+        let outsider = add_creature(&mut state, PlayerId(0), "Outsider");
+
+        let populated = crate::types::identifiers::TrackedSetId(7);
+        state.tracked_object_sets.insert(populated, vec![member]);
+        // A later effect published an empty set with a higher id (e.g. a
+        // zero-picked selection). No chain set is active.
+        let empty = crate::types::identifiers::TrackedSetId(8);
+        state.tracked_object_sets.insert(empty, Vec::new());
+        assert_eq!(state.chain_tracked_set_id, None);
+
+        let filter = sentinel_tracked_set_filtered(None);
+        assert!(
+            matches_target_filter(&state, member, &filter, member),
+            "the latest NON-EMPTY set (7) must win — a trailing empty set (8) must not shadow it"
+        );
+        assert!(
+            !matches_target_filter(&state, outsider, &filter, member),
+            "objects outside the resolved set must not match"
+        );
+    }
+
+    /// #5512 failure mode 1 (no chain rung): `TrackedSetFiltered`'s sentinel
+    /// previously ignored `chain_tracked_set_id`, so a set published by the
+    /// ACTIVE resolution chain lost to any later-published set. Routed through
+    /// `resolve_tracked_set_id`, the chain set is preferred — matching every
+    /// other `TrackedSetId(0)` consumer.
+    #[test]
+    fn tracked_set_filtered_sentinel_prefers_chain_set() {
+        let mut state = setup();
+        let chain_member = add_creature(&mut state, PlayerId(0), "Chain Member");
+        let later_member = add_creature(&mut state, PlayerId(0), "Later Member");
+
+        let chain_set = crate::types::identifiers::TrackedSetId(5);
+        state
+            .tracked_object_sets
+            .insert(chain_set, vec![chain_member]);
+        let later_set = crate::types::identifiers::TrackedSetId(9);
+        state
+            .tracked_object_sets
+            .insert(later_set, vec![later_member]);
+        state.chain_tracked_set_id = Some(chain_set);
+
+        let filter = sentinel_tracked_set_filtered(None);
+        assert!(
+            matches_target_filter(&state, chain_member, &filter, chain_member),
+            "the active resolution chain's set (5) must win over a later published set (9)"
+        );
+        assert!(
+            !matches_target_filter(&state, later_member, &filter, chain_member),
+            "members of the non-chain set must not match while a chain set is active"
+        );
+    }
+
+    /// #5512 regression guard for the Zimone's Experiment / Living Death class:
+    /// the `caused_by` producer-action provenance must key off the RESOLVED set
+    /// id — the same set whose membership was matched — not the raw max id.
+    /// With a trailing empty set (higher id) present, the cause lookup for a
+    /// member of the populated set must consult set 7's causes and still match;
+    /// a member whose recorded cause differs must still be rejected.
+    #[test]
+    fn tracked_set_filtered_caused_by_keys_off_resolved_set_id() {
+        use crate::types::ability::ThisWayCause;
+        let mut state = setup();
+        let sacrificed = add_creature(&mut state, PlayerId(0), "Sacrificed Member");
+        let exiled = add_creature(&mut state, PlayerId(0), "Exiled Member");
+
+        let populated = crate::types::identifiers::TrackedSetId(7);
+        state
+            .tracked_object_sets
+            .insert(populated, vec![sacrificed, exiled]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(sacrificed, ThisWayCause::Sacrificed);
+        causes.insert(exiled, ThisWayCause::Exiled);
+        state.tracked_set_member_causes.insert(populated, causes);
+        // The shadowing empty set that previously broke sentinel resolution.
+        let empty = crate::types::identifiers::TrackedSetId(8);
+        state.tracked_object_sets.insert(empty, Vec::new());
+
+        let sacrificed_this_way = sentinel_tracked_set_filtered(Some(ThisWayCause::Sacrificed));
+        assert!(
+            matches_target_filter(&state, sacrificed, &sacrificed_this_way, sacrificed),
+            "the cause lookup must consult the RESOLVED set's (7) provenance and match"
+        );
+        assert!(
+            !matches_target_filter(&state, exiled, &sacrificed_this_way, sacrificed),
+            "a member whose recorded producer action differs (Exiled) must not match Sacrificed"
+        );
+    }
+
+    /// Concrete (non-sentinel) `TrackedSetFiltered` ids bypass the ladder
+    /// entirely — the Zimone's Experiment / Living Death resolver paths bind a
+    /// real id before evaluation, and #5512 must not change that path.
+    #[test]
+    fn tracked_set_filtered_concrete_id_unaffected_by_ladder() {
+        use crate::types::ability::ThisWayCause;
+        let mut state = setup();
+        let member = add_creature(&mut state, PlayerId(0), "Bound Member");
+
+        let bound = crate::types::identifiers::TrackedSetId(3);
+        state.tracked_object_sets.insert(bound, vec![member]);
+        let mut causes = std::collections::HashMap::new();
+        causes.insert(member, ThisWayCause::Exiled);
+        state.tracked_set_member_causes.insert(bound, causes);
+        // Chain and later sets exist but must be ignored for a concrete id.
+        let later = crate::types::identifiers::TrackedSetId(9);
+        state.tracked_object_sets.insert(later, Vec::new());
+        state.chain_tracked_set_id = Some(later);
+
+        let filter = TargetFilter::TrackedSetFiltered {
+            id: bound,
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            caused_by: Some(ThisWayCause::Exiled),
+        };
+        assert!(
+            matches_target_filter(&state, member, &filter, member),
+            "a concrete id must resolve directly, ignoring chain/latest ladder state"
+        );
     }
 
     /// De Morgan: `[Not(Attacked), Not(Entered)]` AND-combines, so it matches
