@@ -968,6 +968,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 107.1c: "return any number of [filter] cards" — zero-or-more
+        /// resolution-time zone selection (Grave Sifter class).
+        up_to: bool,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of

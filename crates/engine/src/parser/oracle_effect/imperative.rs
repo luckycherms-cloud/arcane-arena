@@ -1775,6 +1775,17 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             (is_mass, target_text)
         };
+        // CR 107.1c: "return any number of [filter] cards" — strip the quantifier
+        // before target parsing and carry `up_to` onto `ReturnToZone` (Grave Sifter).
+        let target_lower = target_text.to_ascii_lowercase();
+        let any_number_prefix = tag::<_, _, OracleError<'_>>("any number of ")
+            .parse(target_lower.as_str())
+            .ok()
+            .map(|(rest, _)| target_lower.len() - rest.len());
+        let (target_text, return_up_to) = match any_number_prefix {
+            Some(consumed) => (&target_text[consumed..], true),
+            None => (target_text, false),
+        };
         let counted_return = parse_count_expr(target_text).and_then(|(mut count, after_count)| {
             let filter = extract_object_count_filter(&count)?;
             if nom_primitives::scan_contains(rest_lower, "rounded up") {
@@ -1907,6 +1918,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
+                        up_to: return_up_to,
                     })
                 } else {
                     Some(TargetedImperativeAst::Return { target, selection })
@@ -1927,6 +1939,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
+                        up_to: return_up_to,
                     })
                 }
             }
@@ -2160,6 +2173,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             origin,
             destination,
+            up_to,
         } => Effect::ChangeZone {
             origin,
             destination,
@@ -2169,7 +2183,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_under: None,
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
-            up_to: false,
+            up_to,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             face_down_profile: None,

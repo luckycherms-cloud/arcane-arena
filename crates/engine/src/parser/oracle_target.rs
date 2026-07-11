@@ -9,11 +9,11 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty, ObjectScope,
-    ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, TypeFilter,
-    TypedFilter,
+    AggregateFunction, AttachmentKind, ChoiceType, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty,
+    ObjectScope, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2983,8 +2983,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
                     | TypeFilter::Battle
             )
         );
+        // CR 205.3m + CR 608.2c: When a preceding `Choose` committed
+        // `CreatureType`, "cards of that type" still refers to the chosen
+        // creature subtype (Grave Sifter), not a card type — even though the
+        // head noun is `Card`. Without this override, `IsChosenCardType` reads
+        // the wrong `ChosenAttribute` axis and the graveyard return finds no
+        // eligible cards.
         let chosen_prop = if is_card_typed_base {
-            FilterProp::IsChosenCardType
+            match ctx.pending_choice_type.as_ref() {
+                Some(ChoiceType::CreatureType { .. }) => FilterProp::IsChosenCreatureType,
+                _ => FilterProp::IsChosenCardType,
+            }
         } else {
             FilterProp::IsChosenCreatureType
         };

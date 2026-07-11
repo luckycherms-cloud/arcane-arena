@@ -2475,6 +2475,19 @@ fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
                 },
                 Effect::Shuffle { .. }
             )
+            // CR 608.2c + CR 101.4: "each player chooses [value] and returns
+            // [cards] from their graveyard to their hand" (Grave Sifter) — the
+            // persisting `Choose` and the graveyard `ChangeZone` are one
+            // per-player instruction. Detaching the return as an unscoped tail
+            // would run every player's return only after ALL players chose,
+            // skipping each player's return after their own choice (#5279).
+            | (
+                Effect::Choose { persist: true, .. },
+                Effect::ChangeZone {
+                    origin: Some(_),
+                    ..
+                }
+            )
     )
 }
 
@@ -2644,6 +2657,13 @@ fn detach_after_player_scope_local_chain(
         || next_is_optional_clause_continuation
         || is_player_scope_local_continuation(&node.effect, &next.effect)
     {
+        // CR 608.2c: co-scoped continuations kept inside the scoped template
+        // inherit the outer iteration — redundant `player_scope` on the child
+        // would re-enter the fan-out driver mid-instruction (Grave Sifter:
+        // Choose → graveyard ChangeZone must run once per outer iteration).
+        if is_player_scope_local_continuation(&node.effect, &next.effect) {
+            next.player_scope = None;
+        }
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
         node.sub_ability = Some(next);
         tail
@@ -9610,12 +9630,12 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CardPredicateChoice, CastingPermission, ChoiceValue, Chooser, ChosenAttribute, Comparator,
-        ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, EffectScope,
-        FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee, PlayerFilter,
-        PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext, StaticDefinition,
-        TapStateChange, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessPayModifier,
-        UntilCondition, ZoneOwner,
+        CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
+        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
+        EffectScope, FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee,
+        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
+        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
+        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -17520,6 +17540,64 @@ mod tests {
             detached.player_scope,
             Some(PlayerFilter::All),
             "the detached Draw keeps its own player_scope so it fans out post-all-reveals"
+        );
+
+        // Choose(CreatureType) → ChangeZone(graveyard return), all scope=All
+        // (Grave Sifter, issue #5279). The return must stay inside each outer
+        // iteration and must not re-enter the fan-out driver mid-instruction.
+        let mut choose_return = ResolvedAbility::new(
+            Effect::Choose {
+                choice_type: ChoiceType::creature_type(),
+                persist: true,
+                selection: TargetSelectionMode::Chosen,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        choose_return.player_scope = Some(PlayerFilter::All);
+        let mut graveyard_return = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                target: TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::IsChosenCreatureType]),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        graveyard_return.player_scope = Some(PlayerFilter::All);
+        choose_return.sub_ability = Some(Box::new(graveyard_return));
+
+        let (scoped_choose, tail_choose) =
+            split_player_scope_chain(&choose_return, &PlayerFilter::All);
+        assert!(
+            tail_choose.is_none(),
+            "the graveyard return stays inside the choose iteration"
+        );
+        let return_in_scope = scoped_choose
+            .sub_ability
+            .as_ref()
+            .expect("ChangeZone stays attached");
+        assert!(
+            matches!(return_in_scope.effect, Effect::ChangeZone { .. }),
+            "ChangeZone is the kept sub-clause"
+        );
+        assert!(
+            return_in_scope.player_scope.is_none(),
+            "the kept ChangeZone's redundant player_scope is cleared"
         );
     }
 

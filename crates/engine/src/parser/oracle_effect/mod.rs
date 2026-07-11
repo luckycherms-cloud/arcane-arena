@@ -13957,6 +13957,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
+                            up_to: false,
                         },
                         rem,
                     ))
@@ -13983,6 +13984,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
+                            up_to: false,
                         },
                         rem,
                     ))
