@@ -17817,6 +17817,15 @@ pub enum ReplacementCondition {
     /// instead" — Freyalise's Winds, Edge of Malacol) so it does NOT apply to
     /// effect-untaps ("untap target creature") at other times.
     DuringUntapStep,
+    /// CR 504.1 + CR 614.1a: Replacement applies only during the draw step.
+    /// Used by Island Sanctuary ("If you would draw a card during your draw
+    /// step..."). `active_player_req` scopes whose draw step: `Some(You)` gates
+    /// on the source controller's turn (CR 504.1 turn-based draw), `Some(Opponent)`
+    /// on an opponent's draw step, `None` on any draw step.
+    DuringDrawStep {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_player_req: Option<ControllerRef>,
+    },
     /// CR 611.2b: "for as long as you control [source]" continuous-effect
     /// duration, encoded as a replacement applicability gate. The replacement
     /// applies only while `source` is on the battlefield AND still controlled by
