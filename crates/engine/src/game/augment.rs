@@ -42,6 +42,7 @@ pub fn resolve_combine_host(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CombineHost,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     };
@@ -60,6 +61,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -68,6 +70,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -90,6 +93,7 @@ pub fn resolve_combine_host(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::CombineHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -123,6 +127,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }
@@ -153,6 +158,7 @@ pub fn resolve_choose_augment_and_combine(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAugmentAndCombineWithHost,
                 source_id: ability.source_id,
+                subject: None,
             });
             Ok(())
         }

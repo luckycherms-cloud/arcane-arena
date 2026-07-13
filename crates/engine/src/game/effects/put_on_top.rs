@@ -182,6 +182,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -205,6 +206,7 @@ pub fn resolve(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::PutAtLibraryPosition,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(());
                 }
@@ -247,6 +249,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -349,6 +352,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::PutAtLibraryPosition,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -640,7 +644,8 @@ mod tests {
             events.as_slice(),
             [GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
-                source_id: ObjectId(100)
+                source_id: ObjectId(100),
+                ..
             }]
         ));
     }

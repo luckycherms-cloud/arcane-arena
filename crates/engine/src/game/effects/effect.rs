@@ -94,6 +94,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -2842,6 +2843,7 @@ mod tests {
             GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
                 source_id: ObjectId(1),
+                subject: None,
             },
         ];
         let expr = QuantityExpr::Ref {
