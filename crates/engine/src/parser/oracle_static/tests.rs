@@ -28889,3 +28889,79 @@ fn filter_scoped_cant_be_activated_parses_mana_ability_exemption() {
         s[0].mode
     );
 }
+
+/// CR 613.4c: a "+X/+Y" pump whose two axes bind to DIFFERENT quantities —
+/// Aspect of Wolf: "X is half the number of Forests you control, rounded down,
+/// and Y is half ..., rounded up". Power scales by the rounded-DOWN half,
+/// toughness by the rounded-UP half (the discriminating detail: a single-quantity
+/// implementation would apply the same rounding to both axes).
+#[test]
+fn dynamic_pt_pump_binds_x_and_y_axes_to_distinct_quantities() {
+    let s = super::shared::parse_static_line_multi(
+        "Enchanted creature gets +X/+Y, where X is half the number of Forests you control, rounded down, and Y is half the number of Forests you control, rounded up.",
+    );
+    assert_eq!(s.len(), 1, "Aspect of Wolf: {s:?}");
+    let power = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicPower { value } => Some(value),
+        _ => None,
+    });
+    let toughness = s[0].modifications.iter().find_map(|m| match m {
+        ContinuousModification::AddDynamicToughness { value } => Some(value),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            power,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Down,
+                ..
+            })
+        ),
+        "power axis must be half rounded DOWN, got {power:?}"
+    );
+    assert!(
+        matches!(
+            toughness,
+            Some(QuantityExpr::DivideRounded {
+                divisor: 2,
+                rounding: RoundingMode::Up,
+                ..
+            })
+        ),
+        "toughness axis must be half rounded UP, got {toughness:?}"
+    );
+}
+
+/// #5743 review [HIGH] regression guard: a "+X/+Y" / "-X/-Y" pump WITHOUT a
+/// structured "where X is <A>, and Y is <B>" paired binding must stay
+/// unsupported — it must NOT synthesize a cost-X static. Snowblind's
+/// "Enchanted creature gets -X/-Y." defines X/Y in later conditional sentences
+/// (no `{X}` cost), so it previously regressed to a bogus -CostXPaid/-CostXPaid.
+#[test]
+fn distinct_xy_pump_without_paired_binding_is_unsupported() {
+    // Snowblind: no where-clause at all on the -X/-Y line.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets -X/-Y.").is_empty(),
+        "Snowblind -X/-Y must not synthesize a static without a paired binding"
+    );
+    // A +X/+Y line with a where-clause that binds only X (no ", and Y is") is
+    // likewise unsupported rather than reusing X's quantity for Y.
+    assert!(
+        super::shared::parse_static_line_multi(
+            "Enchanted creature gets +X/+Y, where X is the number of Forests you control."
+        )
+        .is_empty(),
+        "+X/+Y with an X-only binding must stay unsupported"
+    );
+    // `Y` is supported only as the toughness axis of the paired +X/+Y form;
+    // other Y placements cannot inherit X/cost-X semantics.
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+X.").is_empty(),
+        "+Y/+X must stay unsupported rather than treating Y as cost-X"
+    );
+    assert!(
+        super::shared::parse_static_line_multi("Enchanted creature gets +Y/+Y.").is_empty(),
+        "+Y/+Y must stay unsupported rather than treating Y as cost-X"
+    );
+}
