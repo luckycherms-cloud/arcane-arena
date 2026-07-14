@@ -58,6 +58,47 @@ fn dynamic_for_each_pump_recovers_trailing_quoted_ability() {
     );
 }
 
+/// #5681: `classify_quoted_inner` is the single boundary every quoted-ability
+/// grant funnels through. Oracle's punctuation convention carries the enclosing
+/// sentence's COMMA INSIDE the closing quote when a clause follows ("...until end
+/// of turn,"); that comma is not part of the ability and must be normalized away,
+/// or the inner duration matcher misses and the phrase falls through to prose. A
+/// comma-tailed body must parse identically to its clean form — building-block
+/// coverage, not a single card. A trailing PERIOD is the ability's own terminal
+/// punctuation and is deliberately left intact (it feeds the description, #5599).
+#[test]
+fn classify_quoted_inner_normalizes_trailing_sentence_comma() {
+    let base = "{G}{W}: Enchanted creature gains indestructible until end of turn";
+    let clean = classify_quoted_inner(base);
+    for suffix in [",", " ,", ",,"] {
+        let dirty = classify_quoted_inner(&format!("{base}{suffix}"));
+        assert_eq!(dirty, clean, "trailing {suffix:?} changed the parse",);
+    }
+    let ContinuousModification::GrantAbility { definition } = clean
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("expected a granted activated ability")
+    else {
+        unreachable!()
+    };
+    assert_eq!(definition.duration, Some(Duration::UntilEndOfTurn));
+    // A trailing period is NOT stripped — it is the ability's own terminal
+    // punctuation, preserved verbatim in the serialized description (#5599).
+    let with_period = classify_quoted_inner("{T}: Add {G}.");
+    let ContinuousModification::GrantAbility { definition } = with_period
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("mana ability grant")
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        definition.description.as_deref(),
+        Some("{T}: Add {G}."),
+        "terminal period must be preserved in the granted description",
+    );
+}
+
 // Regression: a for-each pump with only a trailing KEYWORD is unchanged and gains
 // no spurious subtype/grant.
 #[test]
