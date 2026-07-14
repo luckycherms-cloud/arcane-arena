@@ -126,6 +126,7 @@ mod festival_of_embers_graveyard_additional_cost;
 mod field_marshal_soldier_anthem_first_strike;
 mod finality_counter_death_to_exile;
 mod fireball_x_cost_surcharge_timing;
+mod flashback_nonmana_payability;
 mod flickerwisp_delayed_return;
 mod floodpits_drowner;
 mod flowstone_surge_mixed_anthem;

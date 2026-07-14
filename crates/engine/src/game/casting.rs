@@ -12033,17 +12033,15 @@ fn can_cast_prepared_now_with_probe(
             );
     }
 
-    // CR 702.34a + CR 118.3 + CR 119.8: Flashback's non-mana cost (e.g. "pay N
-    // life") is an additional cost. Pre-check affordability so a CantLoseLife
-    // lock or insufficient life filters the flashback from legal actions.
+    // CR 702.34a + CR 118.3 + CR 601.2h: Flashback's alternative cost must be
+    // payable in full. Pre-check every non-mana component so legal actions do
+    // not offer a cast that the payment pipeline must reject later.
     if prepared.casting_variant == CastingVariant::Flashback {
         if let Some(FlashbackCost::NonMana(ref cost)) =
             super::keywords::effective_flashback_cost(state, prepared.object_id)
         {
-            if let Some(amount) = find_pay_life_cost(cost, state, player, prepared.object_id) {
-                if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
-                    return false;
-                }
+            if !cost.is_payable(state, player, prepared.object_id) {
+                return false;
             }
         }
     }
