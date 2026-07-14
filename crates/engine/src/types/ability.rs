@@ -8793,6 +8793,17 @@ pub enum LibraryPosition {
     BeneathTop {
         depth: QuantityExpr,
     },
+    /// Digital-only Alchemy (no CR entry — Alchemy is a digital-only format):
+    /// "into the top N cards of [a] library at random". The object is inserted at
+    /// a uniformly random 0-based index in `[0, min(n, library_len))`, so it lands
+    /// somewhere among the top N cards and is drawn within roughly N draws. `n` is
+    /// resolved at resolution time. Produced only by the Alchemy conjure arm
+    /// ("conjure a duplicate of that creature into the top five cards of your
+    /// library at random" — Goblin Morale Sergeant, Jessie Zane, Fangbringer,
+    /// Mine Security, Sheoldred's Assimilator, Sliver Weftwinder).
+    RandomWithinTop {
+        n: QuantityExpr,
+    },
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -12360,6 +12371,25 @@ pub enum Effect {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
+        /// When `destination` is `Zone::Library`, an optional slot override.
+        /// Mirrors `Effect::ChangeZone`'s `library_position`. `None` = the default
+        /// bottom-of-library placement `zones::create_object` performs. `Some`
+        /// carries the Alchemy "into the top N cards … at random" positional
+        /// constraint (`LibraryPosition::RandomWithinTop`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_position: Option<LibraryPosition>,
+        /// Which players' libraries receive the conjured cards, when the
+        /// destination is a positional library slot. `None` = the controller's
+        /// library only ("into the top N cards of *your* library at random", and
+        /// every non-library conjure). `Some(PlayerFilter::All)` fans the conjure
+        /// out to *each player's* library — one independent copy per affected
+        /// player, owned by and placed in that player's own library (Sandcloud
+        /// Harbinger: "conjure three cards named Sunscorched Desert into the top
+        /// ten cards of each player's library at random"). Separate from
+        /// `library_position` because "which libraries" (player axis) and "where
+        /// within a library" (position axis) are independent concerns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library_players: Option<PlayerFilter>,
     },
     /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
     /// modification to the matched cards that persists for the rest of the game
