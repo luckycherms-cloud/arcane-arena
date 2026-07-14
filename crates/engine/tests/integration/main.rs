@@ -19,6 +19,7 @@ mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod aspect_of_wolf_per_axis_xy;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;
+mod atomic_mana_payment;
 mod attack_qualifier_stack_conditions;
 mod auntie_ool_minus_one_counter_trigger;
 mod aura_graft_enchant_restriction;
