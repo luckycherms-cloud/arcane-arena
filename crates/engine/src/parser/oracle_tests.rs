@@ -10486,10 +10486,18 @@ fn triggered_modal_header_supports_you_may_choose_and_constraints() {
             &[],
         );
     assert_eq!(r.triggers.len(), 1);
+    assert!(
+        r.triggers[0].optional,
+        "you may choose two header must make the trigger optional"
+    );
     let execute = r.triggers[0]
         .execute
         .as_ref()
         .expect("trigger should have execute");
+    assert!(
+        execute.optional,
+        "optional triggered modal must stamp execute.optional for resolution"
+    );
     let modal = execute.modal.as_ref().expect("execute should be modal");
     assert_eq!(modal.min_choices, 2);
     assert_eq!(modal.max_choices, 2);

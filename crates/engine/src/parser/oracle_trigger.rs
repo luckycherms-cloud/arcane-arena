@@ -1625,7 +1625,16 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             }
             Some(Box::new(ability))
         }
-        Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
+        Some(TriggerBody::PreLowered(ability)) => {
+            // CR 603.5: Pre-lowered bodies (inline modals, vote blocks, etc.)
+            // may not have stamped `optional` during extraction even when the
+            // trigger effect began with "you may".
+            let mut ability = ability.clone();
+            if modifiers.optional {
+                ability.optional = true;
+            }
+            Some(ability)
+        }
         None => None,
     };
 

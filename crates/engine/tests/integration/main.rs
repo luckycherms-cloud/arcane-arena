@@ -486,6 +486,7 @@ mod issue_536_six_grants_retrace;
 mod issue_541_endurance_graveyard_to_bottom;
 mod issue_544_krark_clan_ironworks_auto_pass;
 mod issue_5631_dragon_kami_reborn_hatching_counter;
+mod issue_5640_shadrix_optional_triggered_modal;
 mod issue_564_wishclaw_talisman_control;
 mod issue_5657_zurs_weirding;
 mod issue_565_birthing_ritual_end_step_trigger;

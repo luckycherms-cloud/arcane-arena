@@ -73,6 +73,31 @@ pub(super) fn handle_optional_effect_choice(
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
             result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        } else if state.pending_trigger.as_ref().is_some_and(|t| {
+            t.ability.optional
+                && t.modal
+                    .as_ref()
+                    .is_some_and(|_| !t.mode_abilities.is_empty())
+        }) {
+            // CR 608.2c + CR 700.2b: Optional triggered modal ("you may choose N") —
+            // the decline/accept gate runs before mode selection while the stack
+            // entry is still mid-construction.
+            if accept {
+                super::engine::clear_pending_trigger_optional(state);
+                if let Some(waiting) = super::engine::begin_pending_trigger_target_selection(state)?
+                {
+                    state.waiting_for = waiting;
+                } else {
+                    state.waiting_for = WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
+            } else {
+                super::engine::drop_mid_construction_pending_trigger(state);
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+            }
         }
     }
 
