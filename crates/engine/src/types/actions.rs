@@ -204,6 +204,13 @@ pub enum GameAction {
     ChoosePileOpponent {
         opponent: PlayerId,
     },
+    /// CR 601.2c + CR 115.1: The spell controller's answer to
+    /// `WaitingFor::ChooseAnnouncingOpponent` — which opponent announces the
+    /// "of an opponent's choice" target slot. `opponent` must be one of that
+    /// prompt's `candidates`.
+    ChooseAnnouncingOpponent {
+        opponent: PlayerId,
+    },
     /// CR 702.132a: Assist — the caster's answer to `WaitingFor::AssistChoosePlayer`.
     /// `Some(p)` chooses player `p` (one of the prompt's `candidates`) to help pay
     /// the generic mana; `None` declines and proceeds to normal payment.
@@ -1549,6 +1556,7 @@ impl GameAction {
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChoosePileOpponent { .. }
+            | GameAction::ChooseAnnouncingOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }
             | GameAction::CommitAssistPayment { .. }
             | GameAction::ChooseBattleProtector { .. }
