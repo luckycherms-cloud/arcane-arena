@@ -512,6 +512,7 @@ mod issue_580_solitude_evoke_prompt;
 mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
+mod issue_5999_aura_exile_host;
 mod issue_629_fractured_sanity_cycling;
 mod issue_654_stridehangar_automaton;
 mod issue_680_shalai_and_hallar_forgotten_ancient;
