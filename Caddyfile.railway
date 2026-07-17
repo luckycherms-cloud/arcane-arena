@@ -1,0 +1,10 @@
+:{$PORT} {
+    root * /srv
+
+    encode zstd gzip
+
+    # React/Vite single-page application fallback
+    try_files {path} /index.html
+
+    file_server
+}
